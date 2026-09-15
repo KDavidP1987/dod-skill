@@ -1,0 +1,22 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Checker 1: our own script (hand-rolled frontmatter parser; enforces name == folder, placeholders, secrets).
+      - run: npm run validate
+      # Checker 2: Anthropic's parser. Target is `skills`, not `.` — `.` validates only marketplace.json.
+      # --strict turns "passed with warnings" (exit 0 on a missing description) into exit 1.
+      - run: npx -y @anthropic-ai/claude-code plugin validate --strict skills
+      # Manifest check (plugin.json / marketplace.json).
+      - run: npx -y @anthropic-ai/claude-code plugin validate --strict .
