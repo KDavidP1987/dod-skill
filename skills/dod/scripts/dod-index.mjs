@@ -6,6 +6,7 @@
 //   node dod-index.mjs --brief                one line for a session-start hook (never exits non-zero)
 //   node dod-index.mjs --check <slug>         verify one plan's invariants; exit 1 on any violation
 //   node dod-index.mjs --check-index          exit 1 if README.md is missing or stale
+//   node dod-index.mjs --profile              parse the `## Audience` section of <store>/profile.md; one line, or the problems (exit 1)
 //   node dod-index.mjs --selftest             prove the checks block known-bad plans and pass a known-good one
 //                                             (mutates DOD_TEST_SECRET for the process — run it in its own process,
 //                                             as npm run validate and CI do; two selftests in one process race)
@@ -458,7 +459,7 @@ export function scanForLeaks(text, needles) {
 // (relative, missing, or no footer line — freshness handles those). Bounded read from a descriptor, so a file
 // that grows between stat and read is still capped; invalid UTF-8 decodes to U+FFFD and is judged as decoded.
 const INDEX_CAP = 1024 * 1024;
-export const fsio = { statSync, openSync, readSync, closeSync };
+export const fsio = { statSync, openSync, readSync, closeSync, readFileSync };
 function legacyFooter(dir) {
   const f = join(dir, "README.md");
   let fd;
@@ -487,6 +488,93 @@ const LEGACY_MESSAGES = {
 };
 function legacyMessage(l) { const m = LEGACY_MESSAGES[l.kind]; return typeof m === "function" ? m(l) : m; }
 let renderSink = null;
+
+// ---------------------------------------------------------------- audience profile (references/audience.md)
+
+const LEVELS = ["expert", "working", "familiar", "new"];
+const AUDIENCE_ROW_CAP = 500;
+const PROFILE_CAP = 1024 * 1024;
+// Anything printed from a profile value goes through this: control characters and Unicode format characters
+// (bidi overrides, zero-width joiners) can spoof a technology name in a terminal.
+const cleanName = (v) => v.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\p{Cf}]/gu, "");
+const AUD = {
+  who: /^- who · (.*\S)\s*$/,
+  default: /^- default · (\S+)\s*$/,
+  asked: /^- asked · (\S+)\s*$/,
+  row: /^- (.*?) · (\S+?)( · assumed)?\s*$/,
+};
+
+// The `## Audience` section of profile.md: `- who · <role>`, `- default · <level>`, `- asked · <YYYY-MM-DD>`,
+// `- <technology> · <level>[ · assumed]`. Returns { set: false } when there is no section; otherwise the
+// fields, the rows and every grammar problem (one regex per line, no lookback beyond the duplicate map).
+export function parseAudience(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^## Audience\s*$/.test(l));
+  if (start === -1) return { set: false, rows: [], problems: [] };
+  const a = { set: true, who: undefined, default: undefined, asked: undefined, rows: [], problems: [] };
+  const seen = new Map();
+  for (let i = start + 1; i < lines.length && !/^## /.test(lines[i]); i++) {
+    const line = lines[i], n = i + 1;
+    if (!line.trim()) continue;
+    let m;
+    if ((m = line.match(AUD.who))) { a.who = m[1]; if (m[1].length > 80) a.problems.push(`\`who\` over 80 characters (line ${n})`); continue; }
+    if ((m = line.match(AUD.default))) { a.default = m[1]; if (!LEVELS.includes(m[1])) a.problems.push(`unknown level \`${cleanName(m[1])}\` for default (line ${n}) — one of ${LEVELS.join(", ")}`); continue; }
+    if ((m = line.match(AUD.asked))) { a.asked = m[1]; if (!validDate(m[1])) a.problems.push(`\`asked\` is not a valid YYYY-MM-DD: \`${cleanName(m[1])}\` (line ${n})`); continue; }
+    if ((m = line.match(AUD.row))) {
+      const name = m[1], level = m[2], shown = cleanName(name);
+      if (!name.trim()) a.problems.push(`technology name empty (line ${n})`);
+      else if (name.length > 40) a.problems.push(`technology name over 40 characters: \`${shown.slice(0, 40)}…\` (line ${n})`);
+      else if (name.includes(" · ")) a.problems.push(`technology name contains \` · \`: \`${shown}\` (line ${n})`);
+      if (!LEVELS.includes(level)) a.problems.push(`unknown level \`${cleanName(level)}\` for \`${shown}\` (line ${n}) — one of ${LEVELS.join(", ")}`);
+      const key = shown.trim().toLowerCase(); // spoofed names collide with the real one
+      if (seen.has(key)) a.problems.push(`duplicate technology \`${seen.get(key).shown}\` (lines ${seen.get(key).line}, ${n})`); else seen.set(key, { line: n, shown });
+      a.rows.push({ name, level, assumed: Boolean(m[3]), line: n });
+      continue;
+    }
+    a.problems.push(`line matches no form (line ${n}): \`${cleanName(line).slice(0, 60)}\``);
+  }
+  if (a.default === undefined) a.problems.push("missing `- default · <level>`");
+  if (a.asked === undefined) a.problems.push("missing `- asked · <YYYY-MM-DD>`");
+  if (a.rows.length > AUDIENCE_ROW_CAP) a.problems.push(`more than ${AUDIENCE_ROW_CAP} technology rows (${a.rows.length})`);
+  return a;
+}
+
+// Read <store>/profile.md for --profile: absent → not set; over 1 MB → refused before any read; unreadable →
+// the error code. The size check is on the stat, then the read is capped again so a file growing between
+// the two is still refused.
+export function readAudience(dir) {
+  const f = join(dir, "profile.md");
+  let st;
+  try { st = fsio.statSync(f, { throwIfNoEntry: false }); } catch (e) { return { kind: "unreadable", code: e.code ?? "error" }; }
+  if (!st) return { kind: "ok", audience: parseAudience("") };
+  if (st.size > PROFILE_CAP) return { kind: "oversize" };
+  let text;
+  try { text = fsio.readFileSync(f, "utf8"); } catch (e) { return { kind: "unreadable", code: e.code ?? "error" }; }
+  if (Buffer.byteLength(text) > PROFILE_CAP) return { kind: "oversize" };
+  return { kind: "ok", audience: parseAudience(text) };
+}
+
+export const AUDIENCE_MESSAGES = {
+  notSet: "audience: not set — run setup",
+  oversize: "audience: profile.md over 1 MB — not a profile; fix by hand",
+  unreadable: (r) => `audience: cannot read profile.md (${r.code})`,
+  summary: (a) => `audience: default ${a.default} · ${a.rows.length} technologies · asked ${a.asked}`,
+};
+
+function profileCommand(dir) {
+  const r = readAudience(dir);
+  if (r.kind === "unreadable") { console.log(AUDIENCE_MESSAGES.unreadable(r)); return 1; }
+  if (r.kind === "oversize") { console.log(AUDIENCE_MESSAGES.oversize); return 1; }
+  const a = r.audience;
+  if (!a.set) { console.log(AUDIENCE_MESSAGES.notSet); return 0; }
+  if (a.problems.length) {
+    console.log(`audience: invalid — ${a.problems.length} problem(s); effective level expert until fixed`);
+    for (const p of a.problems) console.log(`✗ audience: ${p}`);
+    return 1;
+  }
+  console.log(AUDIENCE_MESSAGES.summary(a));
+  return 0;
+}
 
 function listPlans(plans) {
   if (!plans.length) return "dod: no plans";
@@ -778,11 +866,66 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
     const leakScan = rendered.length >= 8 && leaks.length === 0 && boundary && separators && planted.length === 1 && planted[0] === "secret" && manyLeaks === 0
       && noEntropy.code === 1 && noEntropy.out.trim() === "selftest: no entropy for DOD_TEST_SECRET" && process.env.DOD_TEST_SECRET === secret.value;
 
-    const ok = g.problems.length === 0 && t.problems.length === 0 && missed.length === 0 && rate === 67 && fresh && stale && g.verified === 1 && storeOk && indexRelative && legacyFooterOk && leakScan;
-    console.log(`selftest: known-good problems=${g.problems.length} verified=${g.verified}/${g.total} rate=${rate}%  cancelled-after-ready problems=${t.problems.length}  known-bad caught ${caught.length + caught2.length}/${expectBad.length + expectBad2.length}  index fresh=${fresh} stale-detected=${stale}  store-with-spaces=${storeOk}  index-relative=${indexRelative} legacy-footer=${legacyFooterOk} leak-scan=${leakScan}`);
+    // --- audience-profile: --profile parses the `## Audience` section, reports every problem class, and stays fast at the row cap
+    const profile = join(dir, "profile.md");
+    const section = (rows) => `# Project profile\n\ntext\n\n## Audience\n${rows.join("\n")}\n\n## N/A layers\n- 11 · no UI\n`;
+    const audResults = [];
+    const goodRows = ["- who · project owner", "- default · working", "- asked · 2026-09-15", "- Python · expert", "- HTML/CSS · familiar", "- GitHub Actions · working · assumed"];
+    writeFileSync(profile, section(goodRows));
+    const pGood = run("--profile");
+    audResults.push(pGood.code === 0 && pGood.out === "audience: default working · 3 technologies · asked 2026-09-15");
+    // every problem class, across two sections (a section cannot both lack `asked` and carry an invalid one)
+    writeFileSync(profile, section(["- who · project owner", "- default · guru", "- Python · expert", "- Python · new", "-  · new", `- ${"x".repeat(41)} · new`, "- a · b · new", "- Rust · wizard", "this is not a row"]));
+    const pBad1 = run("--profile");
+    writeFileSync(profile, section([`- who · ${"r".repeat(81)}`, "- default · working", "- asked · 2026-13-40", "- Python · expert"]));
+    const pBad2 = run("--profile");
+    const badOut = `${pBad1.out}\n${pBad2.out}`;
+    const expectAud = ["unknown level `guru` for default", "duplicate technology `Python` (lines 8, 9)", "technology name empty (line 10)", "technology name over 40 characters", "technology name contains ` · `: `a · b`", "unknown level `wizard` for `Rust`", "line matches no form (line 14)", "missing `- asked · <YYYY-MM-DD>`", "`who` over 80 characters", "`asked` is not a valid YYYY-MM-DD: `2026-13-40`"];
+    const missedAud = expectAud.filter((m) => !badOut.includes(`✗ audience: ${m}`));
+    audResults.push(pBad1.code === 1 && pBad2.code === 1 && missedAud.length === 0);
+    // no file, and a file without the section → not set, exit 0
+    rmSync(profile, { force: true });
+    const pNone = run("--profile");
+    writeFileSync(profile, "# Project profile\n\n## N/A layers\n- 11 · no UI\n");
+    const pNoSection = run("--profile");
+    audResults.push(pNone.code === 0 && pNone.out === AUDIENCE_MESSAGES.notSet && pNoSection.code === 0 && pNoSection.out === AUDIENCE_MESSAGES.notSet);
+    // unreadable → the cannot-read line with the code
+    const realReadFile = fsio.readFileSync; fsio.readFileSync = () => { const e = new Error("EACCES: permission denied"); e.code = "EACCES"; throw e; };
+    const pUnreadable = run("--profile");
+    fsio.readFileSync = realReadFile;
+    audResults.push(pUnreadable.code === 1 && pUnreadable.out === "audience: cannot read profile.md (EACCES)");
+    // a name carrying U+202E (a bidi override) is printed without it; duplicates compare case-insensitively and name both lines; removing one row parses clean
+    writeFileSync(profile, section(["- default · working", "- asked · 2026-09-15", "- Re\u202Edis · new", "- redis · new"]));
+    const pDup = run("--profile");
+    writeFileSync(profile, section(["- default · working", "- asked · 2026-09-15", "- Redis · new"]));
+    const pDupFixed = run("--profile");
+    audResults.push(pDup.code === 1 && pDup.out.includes("✗ audience: duplicate technology `Redis` (lines 8, 9)") && !pDup.out.includes("\u202E") && pDupFixed.code === 0 && pDupFixed.out === "audience: default working · 1 technologies · asked 2026-09-15");
+    // 501 rows → the row-count problem; 500 rows → parsed within budget
+    const manyRows = (n) => ["- default · working", "- asked · 2026-09-15", ...Array.from({ length: n }, (_, i) => `- Technology ${i} · ${LEVELS[i % 4]}`)];
+    writeFileSync(profile, section(manyRows(501)));
+    const p501 = run("--profile");
+    audResults.push(p501.code === 1 && p501.out.includes("✗ audience: more than 500 technology rows (501)"));
+    writeFileSync(profile, section(manyRows(500)));
+    const tA = performance.now();
+    const p500 = run("--profile");
+    const audMs = Math.round(performance.now() - tA);
+    console.log(`audience-profile: 500 rows in ${audMs} ms`);
+    audResults.push(p500.code === 0 && p500.out === "audience: default working · 500 technologies · asked 2026-09-15" && audMs <= 250);
+    // 1 MB + 1 byte → refused before any read
+    writeFileSync(profile, Buffer.alloc(PROFILE_CAP + 1, 0x20));
+    let profileReads = 0; fsio.readFileSync = (...a) => { profileReads++; return realReadFile(...a); };
+    const pOversize = run("--profile");
+    fsio.readFileSync = realReadFile;
+    audResults.push(pOversize.code === 1 && pOversize.out === AUDIENCE_MESSAGES.oversize && profileReads === 0);
+    rmSync(profile, { force: true });
+    const audienceProfile = audResults.every(Boolean);
+
+    const ok = g.problems.length === 0 && t.problems.length === 0 && missed.length === 0 && rate === 67 && fresh && stale && g.verified === 1 && storeOk && indexRelative && legacyFooterOk && leakScan && audienceProfile;
+    console.log(`selftest: known-good problems=${g.problems.length} verified=${g.verified}/${g.total} rate=${rate}%  cancelled-after-ready problems=${t.problems.length}  known-bad caught ${caught.length + caught2.length}/${expectBad.length + expectBad2.length}  index fresh=${fresh} stale-detected=${stale}  store-with-spaces=${storeOk}  index-relative=${indexRelative} legacy-footer=${legacyFooterOk} leak-scan=${leakScan} audience-profile=${audienceProfile}`);
     if (!ok) {
       console.log("  index-relative:", { under: footerOf(under), equal: footerOf(equal), outside: footerOf(outside), hostile: hostileFooter, driveLike: footerOf(driveLike), crossRoot: footerOf(crossRoot) });
-      console.log("  legacy-footer:", legacyResults, "leak-scan:", { rendered: rendered.length, leaks, planted, manyLeaks, noEntropy }); console.log("  good problems:", g.problems); console.log("  term problems:", t.problems); console.log("  bad problems:", b.problems); console.log("  bad2 problems:", b2.problems); console.log("  expectations missed:", missed); }
+      console.log("  legacy-footer:", legacyResults, "leak-scan:", { rendered: rendered.length, leaks, planted, manyLeaks, noEntropy });
+      console.log("  audience-profile:", audResults, { missedAud, pBad1: pBad1.out, pBad2: pBad2.out, pDup: pDup.out, audMs }); console.log("  good problems:", g.problems); console.log("  term problems:", t.problems); console.log("  bad problems:", b.problems); console.log("  bad2 problems:", b2.problems); console.log("  expectations missed:", missed); }
     return ok ? 0 : 1;
   } finally {
     renderSink = null;
@@ -804,6 +947,7 @@ function main(argv) {
   if (args.includes("--brief")) { console.log(briefLine(plans, dir, existsSync(dir) && !indexIsFresh(dir, plans))); return 0; }
   if (!existsSync(dir)) { console.error(`no plan store at ${dir} — run the dod skill's setup, or pass --dir`); return 1; }
   if (args.includes("--list")) { console.log(listPlans(plans)); return 0; }
+  if (args.includes("--profile")) return profileCommand(dir);
 
   if (args.includes("--check-index")) {
     const legacy = legacyFooter(dir);
@@ -834,4 +978,9 @@ function main(argv) {
   return 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === SELF) process.exit(main(process.argv));
+// Run main() only when invoked directly, never when imported (the selftest and the validator import this file).
+// Both sides are realpath-resolved: import.meta.url already is, and a skill installed as a symlink
+// (`~/.claude/skills/dod` → the checkout) invokes the script by the link's path — a plain string compare made
+// every command a silent no-op through the link (dod ≤ 0.1.3).
+const invokedDirectly = (() => { try { return Boolean(process.argv[1]) && realpathSync(resolve(process.argv[1])) === realpathSync(SELF); } catch { return false; } })();
+if (invokedDirectly) process.exit(main(process.argv));

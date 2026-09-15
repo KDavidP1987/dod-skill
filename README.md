@@ -4,7 +4,7 @@
 </picture>
 
 [![validate](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml/badge.svg)](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml)
-[![version 0.1.3](https://img.shields.io/badge/version-0.1.3-1F3A5F)](.claude-plugin/plugin.json)
+[![version 0.1.4](https://img.shields.io/badge/version-0.1.4-1F3A5F)](.claude-plugin/plugin.json)
 [![license MIT](https://img.shields.io/badge/license-MIT-2E7D6B)](LICENSE)
 
 # dod — Definition of Done
@@ -12,7 +12,7 @@
 *Plan a feature across fifteen consideration layers, get the plan independently reviewed, freeze it,
 track the build against it, and close with a number: how much of the design the plan foresaw.*
 
-Version 0.1.3 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
+Version 0.1.4 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
 
 ## Contents
 
@@ -23,10 +23,11 @@ Version 0.1.3 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](h
 5. [A plan, end to end](#a-plan-end-to-end)
 6. [The artifacts](#the-artifacts)
 7. [Reviewers](#reviewers)
-8. [The referee script](#the-referee-script)
-9. [Rules the skill will not bend](#rules-the-skill-will-not-bend)
-10. [Limits of this version](#limits-of-this-version)
-11. [Files in this skill](#files-in-this-skill)
+8. [Audience profile](#audience-profile)
+9. [The referee script](#the-referee-script)
+10. [Rules the skill will not bend](#rules-the-skill-will-not-bend)
+11. [Limits of this version](#limits-of-this-version)
+12. [Files in this skill](#files-in-this-skill)
 
 ## What it is for
 
@@ -105,6 +106,7 @@ Natural language is the interface; `/dod <command>` forms are aliases.
 | `report <slug>` | Prediction rate, missed probes, completion vs baseline and vs current. |
 | `list` | Open plans with progress and warnings. |
 | `setup [...]` | See above. |
+| `explain <Dn\|An\|Fn\|question n>` | Restates one item, amendment, finding or question one level plainer, with an example. Changes no file. |
 | `cancel <slug>` · `supersede <slug> --by <slug>` · `reopen <slug>` | Terminal and reverse transitions. |
 
 `--autonomous` asks nothing except blocking gaps (gating probes; decisions about permissions, retention,
@@ -214,6 +216,64 @@ builder could not make alone; edge cases, cleanup and extra fixtures are advisor
 silent. When a round leaves no gating probe open and every finding is decision-free, the skill says so
 and recommends approval rather than another round.
 
+## Audience profile
+
+Plans are read by people who are technical but not fluent in every technology their product uses — the
+Python expert who reads CSS at 60 %, and goes with the recommendation because the question was hard to
+follow. The audience profile fixes that per project, once. It changes only **how questions and plans are
+worded**, per technology; never what they decide.
+
+`setup` (or the first `plan`) scans the repository for technologies and asks:
+
+```
+How comfortable are you with each of these? It changes only how I word questions and plans — never what
+they decide. Levels:
+  expert    — I use the terms, no explanations
+  working   — I know it; explain only the specialised terms
+  familiar  — I follow it; tell me what each term means for the decision
+  new       — plain words first, the term after, with an example
+Technologies I found:
+  CSS
+  Python
+Answer with `all <level>`, or one per line like `Python expert`, plus optional `default <level>` and
+`who <role>`. `skip` leaves it unset for now. This is written to docs/dod/profile.md and committed with
+the repository (a role, a date and these levels — never a name); say `keep it out of git` and I will add
+the .gitignore line instead.
+```
+
+The answer lives in `docs/dod/profile.md`, shown before it is written:
+
+```markdown
+## Audience
+- who · project owner
+- default · working
+- asked · 2026-09-15
+- CSS · new
+- Python · expert
+```
+
+| Level | What you get |
+|---|---|
+| `expert` | Terms of art bare — exactly the wording the skill used before the profile existed. |
+| `working` | Terms bare, but a term specialised to that technology gets one `— which means …` clause the first time. |
+| `familiar` | Every term of art is followed by `— here, that means …`: its consequence for this decision. |
+| `new` | Plain words first, the term in brackets after, and one `For example, …` per decision. |
+
+Each sentence is worded at the level of the technology it is about (a sentence spanning two uses the
+lower); sentences about the product or the process use `default`. A technology the plan touches that has
+no row is asked about once, before the questions. The rules apply to the question batches, the inline
+summary and the plan's prose sections — never to the D-items, the Build plan, the Coverage table or the
+Log, which agents execute and the script parses. Precision never drops: every term stays, a plain clause
+is added. Every recommendation, at every level, says what happens if you take it and if you do not.
+
+`explain D3` (or `A1`, `F2`, `question 4`) restates one thing a level plainer, with an example, in the
+conversation only. `--autonomous` plans never ask; they write ` · assumed` rows and say so in the Log.
+
+Privacy: the section holds a role, a date and levels — never a name — and is committed with the
+repository; `keep it out of git` at the question adds the `.gitignore` line instead. The reviewer never
+sees it. Full rules: `references/audience.md`; the same question at all four levels:
+`tests/audience-example.md`.
+
 ## The referee script
 
 `scripts/dod-index.mjs` — no dependencies, Node 20+.
@@ -224,6 +284,7 @@ node scripts/dod-index.mjs --check <slug>        # verify one plan's invariants;
 node scripts/dod-index.mjs --check-index         # exit 1 if the index is missing, stale, or carries a legacy footer
 node scripts/dod-index.mjs --list                # every plan, read-only
 node scripts/dod-index.mjs --brief               # one line for a session-start hook; never exits non-zero
+node scripts/dod-index.mjs --profile             # the ## Audience section of profile.md: one line, or every problem (exit 1)
 node scripts/dod-index.mjs --selftest            # prove the checks block known-bad plans and pass a known-good one
 ```
 
@@ -267,9 +328,11 @@ references/layers.md         the 15 layers, their probes, the gating probes, siz
 references/plan-template.md  the plan file format and the exact grammar the script parses
 references/review.md         rubric, reviewer types, redaction, dispositions, the stopping signal
 references/lifecycle.md      start / status / amend / close / report / cancel / supersede / reopen
-references/setup.md          store, pointer block, hooks per host, --check
-scripts/dod-index.mjs        the referee: index, --check, --check-index, --selftest
+references/setup.md          store, pointer block, the audience question, hooks per host, --check
+references/audience.md       the four reader levels, where they apply, the question, explain
+scripts/dod-index.mjs        the referee: index, --check, --check-index, --profile, --selftest
 tests/prompts.md             should-trigger / should-not-trigger prompts and results
+tests/audience-example.md    one question at all four levels, with the release checklist
 ```
 
 ---

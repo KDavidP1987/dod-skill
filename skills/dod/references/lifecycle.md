@@ -155,3 +155,10 @@ are shown) and is the same dishonesty as mislabelling an amendment.
 - `<store>/README.md` is generated (`node <skill>/scripts/dod-index.mjs`) and carries a marker line; do
   not hand-edit it. `--check-index` exits 1 when it is stale. It shows **verified** counts, with
   checked-without-evidence items called out separately.
+
+## Wording — the reader's level
+
+The `why` text of an amendment, the close conversation (the excluded amendments, the rate and what it
+means) and the report's missed-probes explanation are worded at the reader's level for the technology
+concerned (`references/audience.md`); the amendment line's grammar, the evidence lines and the `## Report`
+block are not — they are parsed. `explain An` restates an amendment a level plainer on request.

@@ -45,8 +45,10 @@ in testing, and correctly refused to review). So the prompt file **contains ever
    must contain the `## Log` heading and exactly 15 blanked coverage rows; a shorter prompt is a
    truncated plan and the review would be void.
 
-Never include: prior reviews, the conversation, the author's coverage line. Write the file to a temp
-path (`/tmp/dod-review-<slug>.txt`, or `$env:TEMP` on Windows).
+Never include: prior reviews, the conversation, the author's coverage line, or the `## Audience` section of
+`profile.md` — not the heading, not its field lines (`who`, `default`, `asked`), not a technology row. The
+reviewer grades the plan, not the reader; the plan's prose is already worded at the reader's level and goes
+in as written. Write the file to a temp path (`/tmp/dod-review-<slug>.txt`, or `$env:TEMP` on Windows).
 
 ## The rubric (send verbatim)
 
@@ -130,6 +132,9 @@ their answer to "any blocking gaps?". "Looks fine" without the four answers is n
   then `### Dispositions` — every finding `- Fn · accepted · <change, any +Dn>` or `- Fn · rejected ·
   <reason>`. The script rejects a READY review with an undispositioned finding or no coverage line.
   Silence is not a disposition.
+- When showing the dispositions to the user, restate each finding at the reader's level for its
+  technology (audience.md) — the reviews file keeps the reviewer's words verbatim; the conversation does
+  not have to. `explain Fn` restates one finding a level plainer on request.
 - **Reclassifying a finding.** A `blocking` finding that quotes no probe, or whose quoted probe the plan
   does answer (point at the section), is dispositioned `rejected · advisory by rule — <probe> is answered
   at <section>`; you may still act on it. A REVISE whose blocking findings are all reclassified this way

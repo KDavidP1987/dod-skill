@@ -151,3 +151,7 @@ leaf-level detail produces a permanent Gap (the detail belongs in the children) 
 A project may declare layers or probes that are always N/A ("no human-facing surface anywhere: CLI-only
 tool") or add project-specific probes ("10.1 must name the RLS policy"). Each plan must still restate an
 inherited N/A with its reason — the profile is a prompt, not an exemption.
+
+The same file carries the `## Audience` section — the reader's level per technology, written once by
+`setup` and read by every `plan` (`references/audience.md`). It changes how questions and prose are
+worded, never what a layer requires; the probes above are scored exactly the same at every level.

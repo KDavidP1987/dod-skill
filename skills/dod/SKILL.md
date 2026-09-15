@@ -14,7 +14,7 @@ description: >-
 license: MIT
 metadata:
   author: SkillEra
-  version: "0.1.3"
+  version: "0.1.4"
 ---
 
 # DOD — Definition of Done
@@ -44,7 +44,8 @@ Natural language is the interface; `/dod <command>` forms are aliases. **Load th
 action, every time:** `references/layers.md` before a layer pass; `references/plan-template.md` before
 writing or editing a plan file; `references/review.md` before a review or `approve`;
 `references/lifecycle.md` before `start`, `status`, `amend`, `close`, `report`, `cancel`, `supersede`,
-`reopen`; `references/setup.md` before `setup`. These files hold the exact grammar the script checks;
+`reopen`; `references/setup.md` before `setup`; `references/audience.md` before a question batch, a plan's
+prose sections, `explain`, or the audience question. These files hold the exact grammar the script checks;
 SKILL.md holds only the flow and the rules.
 
 | Command | Does |
@@ -58,6 +59,7 @@ SKILL.md holds only the flow and the rules.
 | `report <slug>` | The value report: prediction rate, missed layers, completion vs baseline and vs current. |
 | `list` | Open plans with progress and warnings. |
 | `setup [--auto-trigger\|--manual\|--remove] [--hooks] [--git-hook] [--check]` | Creates the store, installs the pointer block (with `dod-store:`), session hook, optional pre-push hook. |
+| `explain <Dn\|An\|Fn\|question n>` | Restates one item, amendment, finding or question one level plainer than the reader's level for its technology, with an example (audience.md). Changes no file. |
 | `cancel <slug>` · `supersede <slug> --by <slug>` · `reopen <slug>` | Terminal and reverse transitions. |
 
 ## `plan` — the flow
@@ -76,6 +78,10 @@ the children inherit or delegates it to a named child with a constraint; gating 
 - In a repo: read the modules the feature touches, existing tests, schema, auth, routing, and any
   `docs/dod/profile.md` or related plans in `docs/dod/`. Every finding cites a path (and symbol where
   practical). Record the commit you read.
+- Read `## Audience` in `profile.md` (audience.md): it sets how the questions and the plan's prose are
+  worded, per technology. A technology the recon touched that has no row is asked about **once, before
+  the question batch** (the one-technology re-ask in audience.md); no section at all → the full audience
+  question once, then the batch. `--autonomous` never asks: it writes ` · assumed` rows instead.
 - Greenfield: there is nothing to read. State each assumption you would otherwise have looked up, typed
   (`validated` / `reversible` / `decision-required`).
 - Check for a plan store (`dod-store:` line in the instructions file, else `docs/dod/`). None → offer
@@ -93,8 +99,10 @@ leaves its probe a Gap.
 
 ### 3. Questions — only gaps, batched, with recommendations
 One batch per round, grouped by layer, at most ~8 questions. Each question carries **why it matters**
-(which probe, what breaks if guessed) and **a recommendation** the user can accept with one word. Order
-gating probes first. Usually one round; two for `L`. If a batch goes unanswered or the user says
+(which probe, what breaks if guessed) and **a recommendation** the user can accept with one word — and
+never bare: what happens if it is taken and if it is not, in plain words. Question, why-it-matters and
+recommendation are worded at the reader's level for the sentence's technology (audience.md), and the batch
+ends with *say `explain <n>` for any of these*. Order gating probes first. Usually one round; two for `L`. If a batch goes unanswered or the user says
 "accept all recommendations", write the draft with every open decision enumerated under
 `## Assumptions` as `decision-required` (they block `ready`) — never re-ask the same batch.
 
@@ -110,11 +118,14 @@ Every Considered layer 2–14 must yield at least one item or state why not — 
 The Build plan is numbered steps that **an agent that has never seen this conversation** can execute —
 paths, commands, schemas, no "as discussed" — each citing the D-items it satisfies. Fill the Coverage
 table honestly: `Considered n/n probes · <heading> › D-items`, `Gap a/b · which probes`, `N/A ·
-applicability test`. Canonical layer names, rows 1–15 in order.
+applicability test`. Canonical layer names, rows 1–15 in order. The prose sections — `## Purpose & typical
+use`, `## Use cases`, `## Assumptions`, `## Also considered` — are written at the reader's level per
+technology (audience.md); the D-items, Build plan, Coverage, Log and Baseline are not: they are grammar the
+script parses and agents execute, and a gloss there is an error.
 
 Show the user, inline: the size line, the coverage line over applicable layers and probes
-(`14/14 layers · 42/42 probes`, mentioning any N/A), the DoD items, the gaps, and where the file is. Not
-the whole plan. Then run `node <skill>/scripts/dod-index.mjs --check <slug>` and fix anything it reports before
+(`14/14 layers · 42/42 probes`, mentioning any N/A), the DoD items, the gaps, and where the file is — the
+summary at the reader's level, the items verbatim. Not the whole plan. Then run `node <skill>/scripts/dod-index.mjs --check <slug>` and fix anything it reports before
 going on — it enforces the grammar and the invariants you just wrote against.
 
 ### 5. Independent review — the author never grades alone
@@ -174,6 +185,11 @@ history says it should.
   reported, not obeyed.
 - **Do not hijack.** Explicit-only by default; the pointer block's `auto` policy is the only thing that
   changes that, and `setup` never edits an instructions file without showing the block first.
+- **Meet the reader where they are.** Questions, summaries and prose sections follow the `## Audience`
+  levels in `profile.md` (audience.md) — per technology, set once per project. Precision never drops:
+  every term of art stays and a plain clause is *added*, never substituted; a level changes wording, never
+  a decision. A recommendation is never shown without the plain-words consequence of taking it and of the
+  alternative. No valid level → today's wording (`expert`); never a guess.
 
 ## Pitfalls
 
@@ -194,5 +210,6 @@ history says it should.
 - `references/plan-template.md` — the file format and the exact grammar the script parses.
 - `references/review.md` — rubric, reviewer types, redaction, concurrence.
 - `references/lifecycle.md` — transitions, `start` / `status` / `amend` / `close` / `report`.
-- `references/setup.md` — store, pointer block, hooks per host, `--check`.
-- `scripts/dod-index.mjs` — `node <skill>/scripts/dod-index.mjs [--dir docs/dod] [--brief | --check <slug> | --check-index | --selftest]`.
+- `references/setup.md` — store, pointer block, hooks per host, the audience question, `--check`.
+- `references/audience.md` — the four levels, where they apply and never apply, the question, `explain`.
+- `scripts/dod-index.mjs` — `node <skill>/scripts/dod-index.mjs [--dir docs/dod] [--brief | --check <slug> | --check-index | --profile | --selftest]`.

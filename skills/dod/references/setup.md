@@ -13,7 +13,8 @@ reports without changing anything.
 ```
 docs/dod/
   README.md        generated index — marker line on top, never hand-edited
-  profile.md       optional: project-wide N/A layers with reasons, extra probes (see layers.md)
+  profile.md       optional: project-wide N/A layers with reasons, extra probes (layers.md); the
+                   `## Audience` section — the reader's level per technology (audience.md, §3b below)
   <slug>.md        one plan per item (plan-template.md)
   <slug>.reviews.md
 ```
@@ -61,6 +62,76 @@ This is best-effort policy: it works when the host loads the file and the model 
 change the skill's own frontmatter. `setup --check` reports which files carry the block, which policy
 each states, and whether hooks are installed.
 
+## 3b. The audience question — asked once per project
+
+After the pointer block, `setup` asks how technical the reader is, per technology, so that questions and
+plans are worded at their level (`references/audience.md` has the rules; read it first). Scan the
+repository for technology markers (`package.json` → Node.js, `pyproject.toml` → Python, `*.css` → CSS,
+`Cargo.toml` → Rust, `go.mod` → Go, `Gemfile` → Ruby, `composer.json` → PHP, `pom.xml` → Java, `*.csproj`
+→ C#, `Dockerfile` → Docker, `.github/workflows/*.yml` → GitHub Actions, `*.tf` → Terraform, `mix.exs` →
+Elixir, `pubspec.yaml` → Dart, and whatever else the tree plainly shows), list them **alphabetically by
+name, at most 12 per question** (more → consecutive questions of at most 12; each accepted batch is written
+before the next is asked), and ask — this text verbatim, one row per line, never a table, no line over
+120 columns:
+
+```
+How comfortable are you with each of these? It changes only how I word questions and plans — never what
+they decide. Levels:
+  expert    — I use the terms, no explanations
+  working   — I know it; explain only the specialised terms
+  familiar  — I follow it; tell me what each term means for the decision
+  new       — plain words first, the term after, with an example
+Technologies I found:
+  CSS
+  Python
+Answer with `all <level>`, or one per line like `Python expert`, plus optional `default <level>` and
+`who <role>`. `skip` leaves it unset for now. This is written to docs/dod/profile.md and committed with
+the repository (a role, a date and these levels — never a name); say `keep it out of git` and I will add
+the .gitignore line instead.
+```
+
+A scan that finds nothing still asks, with `  none yet` as the list. **Every accepted answer writes a
+complete section** — `who`, `default`, `asked` (today's local date) and one row for every technology
+listed (none for `none yet`) — so nothing listed is ever asked again:
+
+- `all <level>` → `- default · <level>` and every listed technology at `<level>`
+- `<technology> <level>` (one or more, comma- or line-separated) → those rows at their levels; every
+  other listed technology at the default
+- `default <level>` → the `default` line (and the level of every listed technology not named
+  individually); without it, `default · working`
+- `who <role>` → the `who` line; without it, `who · project owner`
+- `skip` → nothing written; wording stays at `expert` for this session; asked again at the next `plan`
+- anything else → show the forms once more; a second unusable answer is `skip`
+- `keep it out of git` → add `docs/dod/profile.md` to `.gitignore` (shown first), then write as usual
+
+Show the exact section **before** writing it — print the block below as a message, then make the tool call
+that writes the file; never write first and show afterwards (the answer was the confirmation, so no second
+"yes" is needed) — and write only that section:
+
+```
+Writing to docs/dod/profile.md (everything else in the file stays):
+
+## Audience
+- who · project owner
+- default · working
+- asked · 2026-09-15
+- CSS · new
+- Python · expert
+```
+
+If `profile.md` is a symlink, add `writing through symlink → <resolved path>` to the first line. Re-read
+the file immediately before writing; replace exactly the span from `## Audience` to the next `## `
+heading (or append the section at the end). Cancelling — `skip`, an empty answer, an interruption —
+writes nothing. Then run `node <skill>/scripts/dod-index.mjs --profile --dir <store>` and confirm in one
+line: `audience recorded: default working · 2 technologies`. If the write fails part-way (it is one
+whole-file write, not atomic), say so: `--profile` reports the damage and `git checkout --
+docs/dod/profile.md` or re-running `setup` repairs it.
+
+Privacy: `who` is a role, never a name or an e-mail. The levels are committed to the repository and stay
+in its history like any other file; offer the `.gitignore` line when that is not wanted. Re-running
+`setup` shows the current rows, asks again, rewrites the section in place, and offers to drop rows for
+technologies the scan no longer finds — never silently.
+
 ## 3. Hooks — so every session opens with the open items in view
 
 **Claude Code** (`.claude/settings.json` in the project, verified against Claude Code 2.1.x):
@@ -90,8 +161,9 @@ the push when the index is stale. Offered, never installed silently.
 ## 4. Without Node
 
 `dod-index.mjs` needs Node 20+. If `node --version` fails, `setup` says so: `list` and `status` still work
-(the model reads frontmatter directly), the index is not regenerated, and the `--check` invariants are not
-verified. `ready` and `done` remain possible only if the user explicitly accepts that: walk the
+(the model reads frontmatter directly), the index is not regenerated, the `--check` invariants are not
+verified, and the `## Audience` section is read directly with the note that its grammar was not checked
+(a section that does not parse by eye counts as no valid level → `expert` wording). `ready` and `done` remain possible only if the user explicitly accepts that: walk the
 readiness / closure checklist aloud with them, ask "the script did not run — proceed?", and write their
 answer into the transition's log line as `· unverified by script · accepted by <user>`. No answer, no
 transition. Do not pretend otherwise.
@@ -105,8 +177,12 @@ dod setup — project: /path
              AGENTS.md  · missing
   hooks      claude SessionStart · installed
              codex / cursor · not available on this host
+  audience   default working · 4 technologies · asked 2026-09-15
   node       v22.20.2
 ```
+
+The `audience` line is `--profile`'s summary; without a section it reads `audience   not set`, and a
+malformed section prints its `✗ audience:` problems under it.
 
 The `store` line's `index fresh` comes from `dod-index.mjs --check-index`. The index footer (`Store: \`docs/dod\``) is a
 path *relative to the working directory* by contract — never absolute. An absolute path there is a leak of the

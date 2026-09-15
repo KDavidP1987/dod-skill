@@ -16,6 +16,9 @@ should-NOT table is the more important half.
 | "/dod status export-csv" | | |
 | "Close the DoD for export-csv and give me the report" | | |
 | "/dod setup --auto-trigger" | | |
+| "/dod setup" in a project with no `## Audience` section (asks the audience question once, then writes it) | | audience-profile D4 |
+| "/dod explain D2" on an open plan (restates one item a level plainer; no file changes) | | audience-profile D6 |
+| "How technical should you be with me on this project?" (should run `setup`'s audience question) | | |
 
 ## Should NOT trigger (or: loads but does not run, and does not interrupt)
 
@@ -27,6 +30,7 @@ should-NOT table is the more important half.
 | "Build the export function" (wants code) | | |
 | "Fix the typo in the header" (smaller than S) | | if invoked explicitly on this, must say it is too small and stop |
 | "claudex this plan" (a different skill) | | |
+| "/dod plan --autonomous <request>" in a project whose profile lacks a touched technology (must NOT ask the audience question; writes a ` · assumed` row and a Log note) | | audience-profile D11 — "quiet" here means no audience question |
 
 ## Auto-trigger policy
 
@@ -49,5 +53,9 @@ Once triggered on `plan`:
   `<slug>.reviews.md` and not the plan?
 - Did the plan refuse `ready` while a `decision-required` assumption existed?
 - Does `node <skill>/scripts/dod-index.mjs --check <slug>` pass on the written plan?
+- With an `## Audience` section: were the question batch and the plan's prose sections worded at the
+  reader's level per technology, with every recommendation carrying both consequences — and were the
+  D-items, Build plan, Coverage and Log lines free of gloss markers (`which means`, `here, that means`,
+  `For example,`)? Did an unrated technology the recon touched get asked about once, before the batch?
 
 Once triggered on `close` with an unverified item: did it refuse and list the item?
