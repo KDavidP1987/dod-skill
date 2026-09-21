@@ -3,7 +3,7 @@
 Run each prompt in a **fresh** session with the skill linked (`npm run link -- dod`). Record what
 happened. Non-interactive form used for the rows below:
 `claude -p "<prompt>" --max-turns 2 --output-format stream-json --verbose > out.jsonl` and
-`grep -c '"skill":"dod"' out.jsonl` (1 = triggered, 0 = quiet). Rows without a date are untested. The skill is ready when every row matches. The skill is explicit-only by design, so the
+`grep -c '"skill":"dod"' out.jsonl` (1 = triggered, 0 = quiet) — for a prompt that begins with `/dod`, the host expands the skill itself and emits no Skill call, so read the first tool call instead: it must be the skill's own first step (its `dod-store:` lookup or a read under `skills/dod/`). Rows without a date are untested. The skill is ready when every row matches. The skill is explicit-only by design, so the
 should-NOT table is the more important half.
 
 ## Should trigger
@@ -19,6 +19,10 @@ should-NOT table is the more important half.
 | "/dod setup" in a project with no `## Audience` section (asks the audience question once, then writes it) | | audience-profile D4 |
 | "/dod explain D2" on an open plan (restates one item a level plainer; no file changes) | | audience-profile D6 |
 | "How technical should you be with me on this project?" (should run `setup`'s audience question) | | |
+| "/dod status plan-readability" (every id's first mention in each message carries its title or meaning — plan-readability D14) | yes | 2026-09-19 · Windows 11, Claude Code 2.1.278, `claude -p` in a fresh session on a temp clone of the lab (skill already junctioned; read-only tools + the dod script) · run 1: final reply clean but one progress message said "D1–D12" bare → **fail, 1**; SKILL.md rule widened to progress notes and ranges · run 2 (stream-json, all 7 messages read): **0 bare first mentions → pass** |
+| "Show me the work breakdown of the dod plans in this project as a tree" | yes | 2026-09-21 · Windows 11, Claude Code 2.1.278, `claude -p` in a fresh session from an empty directory under the OS temp folder (`MSYS_NO_PATHCONV=1`, skill junctioned into `~/.claude/skills`) · first tool call `Skill(dod, "show work breakdown of the dod plans in this project as a tree")` · log `trigger-logs/2026-09-21-wbs-tree.jsonl` |
+| "/dod page wbs-view --review" | yes | 2026-09-21 · Windows 11, Claude Code 2.1.278, `claude -p` in a fresh session from an empty directory under the OS temp folder (`MSYS_NO_PATHCONV=1`, skill junctioned into `~/.claude/skills`) · a typed slash command: the host expanded the skill into the turn and emitted no Skill call; the first tool call was the skill's own store recon `ls -la && (grep -rn "dod-store:" CLAUDE.md AGENTS.md …; ls docs/dod …)` (release-0-2 A6) · log `trigger-logs/2026-09-21-page-review.jsonl` |
+| "/dod amend wbs-view emergent the reviewer found the temp dir survives a crash" | yes | 2026-09-21 · Windows 11, Claude Code 2.1.278, `claude -p` in a fresh session from an empty directory under the OS temp folder (`MSYS_NO_PATHCONV=1`, skill junctioned into `~/.claude/skills`) · expanded the same way, no Skill call; the first tool call read `references/lifecycle.md` and looked for the store and an instructions file, as SKILL.md says `amend` must (release-0-2 A6) · log `trigger-logs/2026-09-21-amend-emergent.jsonl` |
 
 ## Should NOT trigger (or: loads but does not run, and does not interrupt)
 

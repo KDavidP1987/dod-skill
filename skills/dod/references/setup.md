@@ -14,7 +14,9 @@ reports without changing anything.
 docs/dod/
   README.md        generated index — marker line on top, never hand-edited
   profile.md       optional: project-wide N/A layers with reasons, extra probes (layers.md); the
-                   `## Audience` section — the reader's level per technology (audience.md, §3b below)
+                   `## Audience` section — the reader's level per technology (audience.md, §3b below).
+                   A project whose building is done by agents can paste clauses from
+                   `references/profile-agent-work.md` here — optional, five probe additions.
   <slug>.md        one plan per item (plan-template.md)
   <slug>.reviews.md
 ```
@@ -44,14 +46,23 @@ dod-store: docs/dod
 Plans live in the store above (index: `README.md` there). Before building anything that has a plan there,
 read the plan and follow its `## Build plan`; check items only with evidence; record anything the plan
 did not foresee as an amendment before building it; never edit `## Baseline`. Before claiming a feature
-is finished, run the `dod` skill's `status` on it. Trigger policy: manual — plan with `dod` only when
-the user asks for it.
+is finished, run the `dod` skill's `status` on it. At the end of every work session, run `status` on the
+open plans, record anything unforeseen with `amend` before building it, and update any audit or gap
+document in the same pass. Trigger policy: manual — plan with `dod` only when the user asks for it.
 <!-- dod:end -->
 ```
 
 With `--auto-trigger` the last sentence becomes:
 > Trigger policy: auto — when the user asks to plan, design, or build a feature or function in this
 > project, use the `dod` skill to plan it first unless they decline.
+
+**The upkeep sentence.** The block's "at the end of every work session" sentence is the one that keeps a
+plan store true. Plans go stale between sessions, not during them: work gets done, nothing is ticked, and
+the next session reads a plan that no longer describes the build. `setup` offers it in one question —
+*"add the end-of-session step (run `status`, `amend` anything unforeseen before building it, update any
+audit or gap document) to the block?"* — recommends yes, and leaves the sentence out if the user declines.
+Upkeep works as a standing step of the user's own workflow, not as something they have to remember to ask
+for; until a hook can run it (`autonomy-hooks`), the sentence is what carries it.
 
 `--manual` rewrites the sentence back. Removal (`setup --remove`) deletes exactly the text between the
 markers, including the markers, and nothing else; if the markers are missing or duplicated, stop and tell
@@ -131,6 +142,59 @@ Privacy: `who` is a role, never a name or an e-mail. The levels are committed to
 in its history like any other file; offer the `.gitignore` line when that is not wanted. Re-running
 `setup` shows the current rows, asks again, rewrites the section in place, and offers to drop rows for
 technologies the scan no longer finds — never silently.
+
+## 3c. The feedback question — asked once per store, off unless the user says otherwise
+
+dod can post a short public report when a plan closes, so the skill's own layer probes improve where real
+projects say they should. Nothing is ever sent without an answer to this question, and the answer is off
+until the user changes it. Ask it once per store — at `setup`, or at the first interactive `plan` in a
+store that has no entry — and only when `node <skill>/scripts/dod-feedback.mjs --needs-question --dir
+<store>` exits 0. **`--autonomous` never asks and never writes consent.** Ask this text, at the reader's
+level (audience.md), one line per option, no table:
+
+```
+May dod send a short public report when a plan closes?
+
+What would be sent: one issue at https://github.com/KDavidP1987/dod-skill/issues, labelled
+dod-feedback, carrying only this plan's numbers — how much of the design the plan foresaw, which
+probe numbers it missed, the size, the kind, the review rounds and the coverage. No paths, no slugs,
+no plan titles, no dates, no commit ids, no names. You can see the exact text before anything is sent.
+
+Who can see it: everyone — the issue is public. It is posted by whichever GitHub account your `gh` is
+signed in to, which may be a bot or service account if that is what gh uses. That account can edit or
+close the issue; only this repository's maintainer can delete it, and does so on request — open a new
+issue asking for the deletion, or use the contact on the repository page.
+
+Where your answer is kept: on this computer only, in your own ~/.dod/feedback-consent.json, one entry
+per plan store. It is never committed to this repository and never sent anywhere.
+
+Your answer:
+  off      nothing is ever sent — the default, and what I recommend
+  review   I show you the exact report at every close and send it only if you say yes
+  auto     it is sent at every close without asking
+And, unless off, how much to say:
+  numbers  the counts only
+  reasons  the counts plus one short line per missed item, saying what the plan missed
+```
+
+Write the answer with the script, never by hand:
+
+```bash
+node <skill>/scripts/dod-feedback.mjs --set-consent off|review|auto [--detail numbers|reasons] --dir <store>
+node <skill>/scripts/dod-feedback.mjs --profile --dir <store>    # what this store's answer is now
+```
+
+`--set-consent` rewrites only this store's entry — every other store in the record survives a round trip
+byte for byte — creates `~/.dod/` and the file when they are missing, and refuses to overwrite a record
+that is not valid JSON. The record's shape is
+`{"version":1,"stores":{"<store path>":{"consent":"off|review|auto","detail":"numbers|reasons","asked":"YYYY-MM-DD"}}}`.
+No consent lives in `profile.md`: a `## Feedback` section there (from an unreleased draft) is ignored.
+
+**The GitHub credential is gh's, never dod's.** dod reads no token and stores none; `gh` holds it in its
+own store (the OS keychain or gh's config). `gh auth refresh` renews it, `gh auth logout` removes it from
+this machine, and the token or OAuth grant is revoked at github.com › Settings › Developer settings ›
+Personal access tokens, or Settings › Applications for an OAuth grant. gh's own output is read only for
+the created issue's URL and is never printed, logged or written to a plan.
 
 ## 3. Hooks — so every session opens with the open items in view
 

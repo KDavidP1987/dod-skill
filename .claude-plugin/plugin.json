@@ -1,6 +1,6 @@
 {
   "name": "dod",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Definition of Done — plans a feature across fifteen consideration layers, gets the plan independently reviewed, freezes it, tracks the build against it and closes with a prediction rate.",
   "author": {
     "name": "SkillEra IO, LLC",

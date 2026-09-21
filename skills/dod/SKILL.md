@@ -14,7 +14,7 @@ description: >-
 license: MIT
 metadata:
   author: SkillEra
-  version: "0.1.4"
+  version: "0.2.0"
 ---
 
 # DOD — Definition of Done
@@ -54,10 +54,12 @@ SKILL.md holds only the flow and the rules.
 | `approve <slug>` | Records an existing READY review (codex, subagent, or the user's rubric answers) and freezes the baseline → `ready`. It is not itself a review. |
 | `start <slug>` | `ready → in-progress`. Tells the builder the three rules. |
 | `status [slug]` | Verifies each DoD item's evidence and writes evidence lines; lists unverified and "checked without evidence". Never changes lifecycle state. |
-| `amend <slug> <discovered\|requested\|defect\|external> <change>` | Records unplanned work once, typed, and edits the DoD to match. |
+| `amend <slug> <discovered\|corrected\|requested\|emergent\|defect\|external> <change>` | Records unplanned work once, typed, and edits the DoD to match. |
 | `close <slug>` | `done` only when every item has evidence; writes the report. |
 | `report <slug>` | The value report: prediction rate, missed layers, completion vs baseline and vs current. |
 | `list` | Open plans with progress and warnings. |
+| `wbs [slug]` | Prints the store as a tree with baseline and now columns — runs `scripts/dod-wbs.mjs --wbs` (`--compact` off a terminal; `--export csv|md` writes `wbs.csv` / `wbs.md` under the store). |
+| `page <slug> [--review]` | Writes `<store>/<slug>.html` (or `<slug>.review.html`, the score-redacted review page) — runs `scripts/dod-wbs.mjs --html <slug> [--review]`. |
 | `setup [--auto-trigger\|--manual\|--remove] [--hooks] [--git-hook] [--check]` | Creates the store, installs the pointer block (with `dod-store:`), session hook, optional pre-push hook. |
 | `explain <Dn\|An\|Fn\|question n>` | Restates one item, amendment, finding or question one level plainer than the reader's level for its technology, with an example (audience.md). Changes no file. |
 | `cancel <slug>` · `supersede <slug> --by <slug>` · `reopen <slug>` | Terminal and reverse transitions. |
@@ -87,7 +89,9 @@ the children inherit or delegates it to a named child with a constraint; gating 
 - Check for a plan store (`dod-store:` line in the instructions file, else `docs/dod/`). None → offer
   `setup` once. If declined, the plan is **inline**: same content, printed to the user, no lifecycle —
   say plainly that `start`/`status`/`close`/`report` need the store and that `setup` can adopt the plan
-  later by saving it as `<store>/<slug>.md`.
+  later by saving it as `<store>/<slug>.md`. Ask the public-feedback question (setup.md § 3c) only when
+  `scripts/dod-feedback.mjs --needs-question --dir <store>` exits 0 — and never under `--autonomous`,
+  which neither asks it nor writes consent.
 
 ### 2. Layer pass
 For each of the 15 layers, answer every applicable probe from the brief plus recon, with the pointer
@@ -102,7 +106,10 @@ One batch per round, grouped by layer, at most ~8 questions. Each question carri
 (which probe, what breaks if guessed) and **a recommendation** the user can accept with one word — and
 never bare: what happens if it is taken and if it is not, in plain words. Question, why-it-matters and
 recommendation are worded at the reader's level for the sentence's technology (audience.md), and the batch
-ends with *say `explain <n>` for any of these*. Order gating probes first. Usually one round; two for `L`. If a batch goes unanswered or the user says
+ends with *say `explain <n>` for any of these*. A question batch about a plan that already exists carries the
+path of that plan's review page — `<store>/<slug>.review.html`, written by
+`scripts/dod-wbs.mjs --html <slug> --review` — beside the questions, so the reader can see each probe's text
+and the plan's own answer rather than only the question. Order gating probes first. Usually one round; two for `L`. If a batch goes unanswered or the user says
 "accept all recommendations", write the draft with every open decision enumerated under
 `## Assumptions` as `decision-required` (they block `ready`) — never re-ask the same batch.
 
@@ -114,6 +121,17 @@ at the top of the plan that it was planned autonomously.
 ### 4. Draft
 Write `docs/dod/<slug>.md` per the template with `status: draft`. The Definition of Done comes first:
 verifiable statements with stable IDs `D1…Dn` and an evidence type (`test`, `cmd`, `file`, `manual`).
+New plans are written at `dod: 2`: every item starts with a `**title**` (≤ 40 characters, at the reader's
+level) and assumptions are `S-n` (plan-template.md › ID legend; `--migrate` converts a `dod: 1` plan).
+They are also written at `rubric: 2` (plan-template.md › Rubric 2): each Considered row for layers 2–14
+maps **every** probe of its layer — `<heading> › 4.1 D1; 4.2 D1 D2; 4.5 prose: <reason ≥ 12 characters>`,
+`prose:` only for a non-gating probe — and every `test` or `cmd` item ends its evidence with
+`fails when: <input>`. Rubric 2 has 49 probes and 9 gating ones: rubric 1's seven plus `12.4` (a failing
+case for every check) and `14.4` (the paths the build plan walks); `4.5` ("every X" really means every X)
+and `11.4` (activation — the feature is reached by the user, not just built) are the other two additions,
+all four in layers.md. **Prose never stands in for a control**: a sentence saying something is validated,
+enforced or blocked answers no probe unless a D-item fails when the control is removed — `--check` warns
+about each such sentence.
 Every Considered layer 2–14 must yield at least one item or state why not — that is the acceptance gate.
 The Build plan is numbered steps that **an agent that has never seen this conversation** can execute —
 paths, commands, schemas, no "as discussed" — each citing the D-items it satisfies. Fill the Coverage
@@ -146,9 +164,13 @@ middle state.
 ## Tracking and closing — short form
 
 The plan file is the single tracker. `start` opens the build. The builder checks an item only with
-evidence and records anything unforeseen as an amendment **before** building it: `discovered` (the plan
-should have caught it — counts against the plan, one per design change), `requested` (the user changed
-scope — excluded), `defect` (implementation bug — excluded), `external` (the world changed — excluded).
+evidence and records anything unforeseen as an amendment **before** building it, one of six kinds:
+`discovered` (the plan was wrong or missed something — counts against the plan, one per design change),
+`corrected` (a planning decision of the user's own, reversed — counts the same way), `requested` (new
+scope — excluded, and recorded as a plan version), `emergent` (a finding nobody could have foreseen —
+excluded, and its `why` must carry `finding: <what was found and where>`), `defect` (the code was wrong
+and the plan right — excluded), `external` (the world changed — excluded). Each is defined with its one
+test in lifecycle.md, which also says what `close` asks the user about every excluded one.
 A gating-probe or `-Dn` amendment sets `review: pending`; a fresh review (not `approve`) clears it.
 `status` verifies evidence and never changes lifecycle state. `close` requires every item verified and
 writes the report:
@@ -162,7 +184,15 @@ Missed probes    7.2 concurrent use
 The rate answers one question: of the design that turned out to be needed, how much did the plan
 foresee? Below 90 % is a finding about the layer probes, not about the builder — the missed-probes line
 says which, and the index aggregates it across plans so `profile.md` can grow where the project's own
-history says it should.
+history says it should. After the report, `close` runs the feedback step (lifecycle.md › `close`, step 6):
+off sends nothing and says nothing, review shows the draft and waits for an explicit yes, auto sends and
+shows the result — and a failed send never changes the closure.
+
+**Upkeep is a standing step, not a request.** At the end of every work session, run `status` on the open
+plans, record anything unforeseen with `amend` **before** building it, and update any separate audit or
+gap document in the same pass. Recommend this to the user once, as part of their own workflow rather than
+something they have to remember to ask for; `setup` offers to put the sentence in the pointer block
+(setup.md). A plan store goes stale between sessions, not during them.
 
 ## Rules
 
@@ -172,7 +202,7 @@ history says it should.
   `pass` line; every amendment has a kind and a layer.**
 - **The author never grades alone.** Fresh context before `ready`; evidence, not memory, before `done`.
   Author and reviewer scores are shown side by side, never averaged.
-- **`## Baseline` is never edited.** Scope moves through amendments only. Relabelling a material change a
+- **`## Baseline` is never edited** (the one exception is `--migrate --to 1`'s format conversion). Scope moves through amendments only. Relabelling a material change a
   "clarification" — or a `discovered` gap as `requested` — to protect the rate is the exact failure this
   skill exists to prevent; `close` puts every excluded amendment in front of the user.
 - **The plan must survive the conversation.** Paths, commands, schemas; no references to chat.
@@ -190,6 +220,11 @@ history says it should.
   every term of art stays and a plain clause is *added*, never substituted; a level changes wording, never
   a decision. A recommendation is never shown without the plain-words consequence of taking it and of the
   alternative. No valid level → today's wording (`expert`); never a guess.
+- **No bare ids.** The first time an id — D, A, S, F, P, W, a probe (`7.2`) or a layer number — appears in any
+  message to the user, progress notes included, it carries its title or meaning: `D5 (Verification ledger)`,
+  `probe 7.2 (concurrent use)`. A range or list names its group: `D1–D12 (the selftest items)`. Later
+  mentions in the same message may be bare. `--check` and `--list` end with a legend and
+  `names:` lines for the same reason.
 
 ## Pitfalls
 

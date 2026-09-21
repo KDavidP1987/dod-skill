@@ -95,6 +95,12 @@ lines · `## Baseline` · the reviewer prompt and everything the reviewer receiv
 grammar of any section the script parses. These are executed by agents and checked by the referee: a
 gloss there is a grammar error, and the script will report it.
 
+**D-item titles are the one exception inside a D-item.** At `dod: 2` each item begins with a `**title**`
+(plan-template.md › ID legend): a label of at most 40 characters, worded at the reader's level for the
+item's technology, so a person can tell `D5` from `D6` without reading the statement. The title is never
+parsed as grammar and changing it is not an amendment. The statement after it stays grammar — never
+glossed, never simplified to match the title.
+
 ## Precision never drops
 
 Every term that would appear at `expert` still appears at every other level. The levels **add** a clause,

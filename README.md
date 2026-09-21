@@ -4,7 +4,7 @@
 </picture>
 
 [![validate](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml/badge.svg)](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml)
-[![version 0.1.4](https://img.shields.io/badge/version-0.1.4-1F3A5F)](.claude-plugin/plugin.json)
+[![plugin 0.2.0](https://img.shields.io/badge/plugin-0.2.0-1F3A5F)](.claude-plugin/plugin.json)
 [![license MIT](https://img.shields.io/badge/license-MIT-2E7D6B)](LICENSE)
 
 # dod — Definition of Done
@@ -12,7 +12,7 @@
 *Plan a feature across fifteen consideration layers, get the plan independently reviewed, freeze it,
 track the build against it, and close with a number: how much of the design the plan foresaw.*
 
-Version 0.1.4 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
+Version 0.2.0 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
 
 ## Contents
 
@@ -101,10 +101,12 @@ Natural language is the interface; `/dod <command>` forms are aliases.
 | `approve <slug>` | Records an existing `READY` review and freezes the baseline → `ready`. Not itself a review. |
 | `start <slug>` | `ready → in-progress`. States the three builder rules. |
 | `status [slug]` | Verifies each item's evidence, writes evidence lines, lists what is unverified. Never changes lifecycle state. |
-| `amend <slug> <discovered\|requested\|defect\|external> <change>` | Records unplanned work once, typed, and edits the DoD to match. |
+| `amend <slug> <discovered\|corrected\|requested\|emergent\|defect\|external> <change>` | Records unplanned work once, typed, and edits the DoD to match. `discovered` and `corrected` count against the plan; `requested`, `emergent` (a finding nobody could have foreseen, with `finding:` in its why), `defect` and `external` do not. |
 | `close <slug>` | `done` only when every item has evidence; writes the report. |
 | `report <slug>` | Prediction rate, missed probes, completion vs baseline and vs current. |
 | `list` | Open plans with progress and warnings. |
+| `wbs [slug]` | The store as a tree — baseline and now columns, children by `parent:`, work packages when a plan has `## Work breakdown`. Runs `scripts/dod-wbs.mjs --wbs` (`--compact` off a terminal; `--export csv\|md` writes `wbs.csv` / `wbs.md` under the store). |
+| `page <slug> [--review]` | Writes `<store>/<slug>.html` — or, with `--review`, `<slug>.review.html`, the score-redacted page a reviewer reads. Runs `scripts/dod-wbs.mjs --html <slug> [--review]`. |
 | `setup [...]` | See above. |
 | `explain <Dn\|An\|Fn\|question n>` | Restates one item, amendment, finding or question one level plainer, with an example. Changes no file. |
 | `cancel <slug>` · `supersede <slug> --by <slug>` · `reopen <slug>` | Terminal and reverse transitions. |
@@ -123,7 +125,7 @@ assumption that carries its fallback.
 2. **Recon.** The skill reads the modules the feature touches, the tests, the schema, auth and routing,
    and records the commit it read. It never asks what the code can answer. Greenfield: it states each
    assumption it would otherwise have looked up, typed `validated` / `reversible` / `decision-required`.
-3. **Layer pass.** Fifteen layers, forty-five probes. Each probe is answered from the brief plus recon
+3. **Layer pass.** Fifteen layers, forty-nine probes (`rubric: 2`; plans written by 0.1.x keep their forty-five). Each probe is answered from the brief plus recon
    with a pointer into the plan, or it is a **Gap**.
 
    | # | Layer | # | Layer | # | Layer |
@@ -143,7 +145,7 @@ assumption that carries its fallback.
    statements `D1…Dn`, each with an evidence type (`test`, `cmd`, `file`, `manual`). Every Considered
    layer 2–14 yields at least one item or says why not. The Build plan is numbered steps an agent that
    never saw the conversation can execute. You see the size line, the coverage line
-   (`14/15 layers · 42/45 probes`), the items, the gaps, and the path — not the whole file.
+   (`14/15 layers · 46/49 probes`), the items, the gaps, and the path — not the whole file.
 6. **Review.** An independent reviewer gets a score-redacted copy and the rubric, and returns findings
    with `VERDICT: READY` or `REVISE` and its own coverage line. Findings are dispositioned; up to three
    rounds; then the plan goes to you with both coverage lines side by side.
@@ -286,6 +288,7 @@ node scripts/dod-index.mjs --list                # every plan, read-only
 node scripts/dod-index.mjs --brief               # one line for a session-start hook; never exits non-zero
 node scripts/dod-index.mjs --profile             # the ## Audience section of profile.md: one line, or every problem (exit 1)
 node scripts/dod-index.mjs --selftest            # prove the checks block known-bad plans and pass a known-good one
+node scripts/dod-index.mjs --migrate <slug> [--dry-run] [--to 1]   # dod 1 → dod 2 (titles, S-n assumptions); --to 1 converts back
 ```
 
 It runs after every write to a plan file. Among what it refuses: a Considered layer with no pointer to a
@@ -296,6 +299,29 @@ gating-probe amendment with no later `READY` review; an out-of-order amendment o
 runs in `npm run validate` and in CI, and since 0.1.3 also scans everything the script renders for the
 home directory, the temp directory and a per-run secret, so the generated index can never carry an
 absolute path again.
+
+`--migrate <slug>` converts a plan written by 0.1.x (`dod: 1`) to the 0.2.0 format — every item gets a
+`**title**`, assumptions become `S-n` — and refuses a plan whose items have no titles yet; `--to 1` converts
+back, so a store can be taken to an older install. `--dry-run` prints the result without writing.
+
+`scripts/dod-wbs.mjs` is the read-only view over the same store — it never edits a plan:
+
+```bash
+node scripts/dod-wbs.mjs --wbs [--compact] [--versions <n>|all]   # the store as a tree: baseline and now, children, packages
+node scripts/dod-wbs.mjs --export csv|md [--out <path>]           # the same tree as a table, written under the store
+node scripts/dod-wbs.mjs --html <slug> [--review]                 # <store>/<slug>.html, or the score-redacted review page
+node scripts/dod-wbs.mjs --selftest
+```
+
+The exports refuse any destination that is a plan file, the store's `README.md`, a path outside the store or
+a symbolic link; a CSV cell that would start a formula is written with a leading apostrophe. The review page
+carries every probe's text and the plan's own answer with no scores, so a reviewer reads the plan rather
+than grading the author's grade. `references/wbs.md` has the details and the plain-text checklist.
+
+`scripts/dod-feedback.mjs` is the opt-in feedback loop: with consent (kept in your home directory, never in
+a repository) `close` can post a closed plan's numbers — rate, kinds, missed probes, no free text but a
+scrubbed amendment `why` — as one issue on this skill's own repository under the `dod-feedback` label. Off
+is the default: nothing is sent, asked or written without a consent entry.
 
 ## Rules the skill will not bend
 
@@ -314,25 +340,35 @@ absolute path again.
 ## Limits of this version
 
 - One plan per file, one store per project, git as the concurrency control (no locks).
-- The store's `README.md` is written through a symlink if one is there; a v0.2 plan removes that.
-- `Epic` plans hold a child manifest; the roll-up view across arbitrary depth, autonomous plan
-  maintenance via hooks, and `audit` / `enhance` subcommands are planned for v0.2.
+- Autonomous plan maintenance via hooks, and the `audit` / `enhance` subcommands, are planned for dod 0.3.
+- A plan over 1 MB, over 500 items, or holding a line over 10,000 characters is warned about, not refused;
+  whether it should be refused is a dod 0.3 decision (`plan-limits`).
 - The review loop does not converge on its own: three rounds is the cap, and the stopping signal plus a
   human decision is the control. Expect real findings in every round.
 
 ## Files in this skill
 
 ```
-SKILL.md                     the flow and the rules (what the agent loads)
-references/layers.md         the 15 layers, their probes, the gating probes, sizing, the project profile
-references/plan-template.md  the plan file format and the exact grammar the script parses
-references/review.md         rubric, reviewer types, redaction, dispositions, the stopping signal
-references/lifecycle.md      start / status / amend / close / report / cancel / supersede / reopen
-references/setup.md          store, pointer block, the audience question, hooks per host, --check
-references/audience.md       the four reader levels, where they apply, the question, explain
-scripts/dod-index.mjs        the referee: index, --check, --check-index, --profile, --selftest
-tests/prompts.md             should-trigger / should-not-trigger prompts and results
-tests/audience-example.md    one question at all four levels, with the release checklist
+SKILL.md                          the flow and the rules (what the agent loads)
+README.md                         this file
+references/layers.md              the 15 layers, their probes, the gating probes, sizing, the project profile
+references/plan-template.md       the plan file format and the exact grammar the script parses (rubric 2, dod 2)
+references/review.md              rubric, reviewer types, redaction, dispositions, the stopping signal
+references/lifecycle.md           start / status / amend / close / report / cancel / supersede / reopen
+references/setup.md               store, pointer block, the audience question, hooks per host, --check
+references/audience.md            the four reader levels, where they apply, the question, explain
+references/wbs.md                 the work-breakdown view, its exports, the two pages, the plain-text checklist
+references/profile-agent-work.md  optional profile pack: five probe additions for work handed to agents
+scripts/dod-index.mjs             the referee: index, --check, --check-index, --profile, --migrate, --selftest
+scripts/dod-wbs.mjs               the read-only view: --wbs, --export csv|md, --html <slug> [--review], --selftest
+scripts/dod-feedback.mjs          opt-in feedback: --draft, --send, --profile, --set-consent, --selftest
+tests/prompts.md                  should-trigger / should-not-trigger prompts and results
+tests/audience-example.md         one question at all four levels, with the release checklist
+tests/check-workflow.mjs          proves a GitHub Actions workflow runs `npm run validate` on push and pull_request
+tests/fixtures/                   the pinned 0.1 checker the selftest compares against (v01-compat)
+tests/trigger-logs/2026-09-21-wbs-tree.jsonl        the `claude -p` transcript behind the work-breakdown trigger row
+tests/trigger-logs/2026-09-21-page-review.jsonl     the transcript behind the `/dod page … --review` row
+tests/trigger-logs/2026-09-21-amend-emergent.jsonl  the transcript behind the `/dod amend … emergent` row
 ```
 
 ---

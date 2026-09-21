@@ -176,3 +176,45 @@ node skills/dod/scripts/dod-index.mjs --selftest                   # … index-r
 
 To see the referee refuse something, edit one character of D1 in `docs/dod/index-leak-guard.md` and run
 `--check` again: `✗ D1 differs from ## Baseline without a ~D1 amendment`.
+
+## What changed in 0.2.0
+
+The plan above was written by dod 0.1.x. A plan written by 0.2.0 differs in five places, and one of them
+changed the number this walkthrough is about.
+
+- **Every item has a title.** `dod: 2` plans start each item with a `**title**` of at most 40 characters,
+  written at the reader's level, and assumptions are `S-n` instead of `A-n` (so an assumption is never
+  confused with an amendment). `dod-index.mjs --migrate <slug>` converts a 0.1 plan; `--to 1` converts it back.
+- **`rubric: 2` maps every probe.** A Considered row for layers 2–14 no longer points at "some" items: it
+  maps each probe of the layer to the items or the sentence that answers it, and every `test` or `cmd` item
+  ends with `fails when: <input>`. Four probes were added — 4.5 (a rule that says "every X" must say how X is
+  computed and who checks the computation), 11.4 (activation: how the feature is reached when nobody asks),
+  12.4 (a failing case for every check the plan introduces) and 14.4 (every path the build walks) — which
+  makes 49 probes, 12.4 and 14.4 gating. A sentence that says something is validated or enforced answers no
+  probe unless an item fails when the control is removed; `--check` warns about each such sentence.
+- **`## Work breakdown`.** A plan can split its items into packages (`W1`, `W1.2`), every item owned by exactly one leaf package, and
+  `dod-wbs.mjs --wbs` prints the store as a tree — baseline and now per plan, children by `parent:`, packages
+  rolled up; `--export csv|md` writes the same as a table under the store.
+- **Two pages.** `dod-wbs.mjs --html <slug>` writes the plan page; `--html <slug> --review` writes the page a
+  reviewer reads — every probe's text beside the plan's own answer, with the author's scores redacted, so the
+  review starts from the plan rather than from the author's grade.
+- **Two more amendment kinds, and an opt-in feedback loop.** `corrected` (a planning decision of the user's
+  own, reversed — counts against the plan like `discovered`) and `emergent` (a finding nobody could have
+  foreseen; its `why` must carry `finding: <what and where>` — excluded from the rate). At `close`, with
+  consent kept in your home directory and off by default, `dod-feedback.mjs` can post the closed plan's
+  numbers as one issue under the `dod-feedback` label on the skill's own repository.
+
+The shipped example of all five is [`dod/wbs-view.md`](dod/wbs-view.md) with its
+[review record](dod/wbs-view.reviews.md): the plan for the tree, the exports and the two pages, built
+under `rubric: 2`. Its parent, the epic [`dod/dod-v0-2.md`](dod/dod-v0-2.md) that planned 0.2.0 as seven
+children, ships beside it as it stood at this release — still open, its last child being the release itself —
+because a plan that names a `parent:` needs that parent in the same store. It closed at **33 / (33 + 28) = 54 %** — the lowest number in this store, and the
+honest one. Twelve review rounds: eleven by Codex and a fresh-context subagent, which converged once (round 6)
+and then reopened findings on the same gating probes every round until the owner closed the automated loop
+unconverged at round 11; the twelfth was the owner's own four-question review, READY. Of its 28 design
+changes, ten were probe 4.5 — a set enumerated once and never re-derived — which is why 4.5 exists in the
+rubric at all: the first plan written under the probe was the one that kept failing it. Two findings it could not
+resolve (a rename-target race in the export writer, and a package check that proves an item resolves to a
+leaf without proving the leaf owns it) are carried to a 0.3.0 plan rather than dispositioned away. The 0.1
+example above scored 75 % on 45 probes; the 0.2.0 example scored 54 % on 49 because the four new probes,
+and the map that forces every probe to name its item, catch what a coverage line could hide.

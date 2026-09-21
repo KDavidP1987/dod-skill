@@ -20,3 +20,18 @@ jobs:
       - run: npx -y @anthropic-ai/claude-code plugin validate --strict skills
       # Manifest check (plugin.json / marketplace.json).
       - run: npx -y @anthropic-ai/claude-code plugin validate --strict .
+      # Version agreement. Bare on purpose: plugin.json is the source of truth for the
+      # plugin version and each SKILL.md for its own, so there is no number to write
+      # here that could itself go stale.
+      - run: node scripts/validate-skills.mjs --check-versions
+      # Does that guard actually catch drift? Fixture repositories with one version
+      # deliberately stale; every case must be caught.
+      - run: node scripts/tests/check-versions.test.mjs
+      # The dod skill's two scripts run their own suites. These are the remaining two commands of
+      # wbs-view's D29, so this job now runs all four of them and "how would you know it is broken"
+      # has an automatic answer rather than a manual one (wbs-view A16, probe 12.3). Both are
+      # dependency-free and need no install step. The checkers under scripts/checks/ are deliberately
+      # NOT here: page-check.mjs needs an npm install and a browser, they are lab tooling the public
+      # release never copies, and they are run at close instead.
+      - run: node skills/dod/scripts/dod-wbs.mjs --selftest
+      - run: node skills/dod/scripts/dod-index.mjs --selftest

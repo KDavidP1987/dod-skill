@@ -3,7 +3,7 @@
 //
 //   npm run validate            exit 1 on any error, prints warnings
 //   npm run validate -- --table print the README table and exit
-//   node scripts/validate-skills.mjs --check-versions --plugin 0.2.3 --skill dod=0.1.3 [--skill other=1.0.0]
+//   node scripts/validate-skills.mjs --check-versions [--plugin 0.3.0] [--skill dod=0.1.4 ...]
 //                               compare the declared versions in .claude-plugin/plugin.json, the marketplace
 //                               plugin entry and each skill's SKILL.md metadata.version; print `versions ok` or the
 //                               mismatches and exit 1
@@ -14,7 +14,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,22 +23,63 @@ const wantTable = process.argv.includes("--table");
 
 if (process.argv.includes("--check-versions")) process.exit(checkVersions(process.argv.slice(2)));
 
-function checkVersions(args) {
+// Each version has exactly one source of truth: .claude-plugin/plugin.json for the
+// plugin version, and each skill's SKILL.md for its own. Everywhere else that number
+// appears is checked against its source, so no version is ever typed twice. Run bare
+// (what CI does) this needs no arguments and so cannot itself drift. The optional
+// --plugin / --skill arguments additionally assert exact numbers, for a release script
+// that knows what it is releasing.
+export function checkVersions(args, base = root) {
   const opt = (name) => { const k = args.indexOf(name); return k === -1 ? undefined : args[k + 1]; };
   const want = { plugin: opt("--plugin"), skills: args.flatMap((a, i) => (a === "--skill" ? [args[i + 1]] : [])).map((x) => x.split("=")) };
-  if (!want.plugin || want.skills.some((x) => x.length !== 2)) { console.error("usage: --check-versions --plugin <v> --skill <name>=<v> [...]"); return 1; }
+  if (want.skills.some((x) => x.length !== 2)) { console.error("usage: --check-versions [--plugin <v>] [--skill <name>=<v> ...]"); return 1; }
   const mismatches = [];
-  const read = (p) => readFileSync(join(root, p), "utf8");
+  const read = (p) => readFileSync(join(base, p), "utf8");
+  const has = (p) => existsSync(join(base, p));
+
+  // --- the plugin version, and everywhere it is repeated ------------------
   const plugin = JSON.parse(read(join(".claude-plugin", "plugin.json"))).version;
-  if (plugin !== want.plugin) mismatches.push(`.claude-plugin/plugin.json version ${plugin} ≠ ${want.plugin}`);
   const entry = JSON.parse(read(join(".claude-plugin", "marketplace.json"))).plugins?.find((p) => p.source === "./")?.version;
-  if (entry !== want.plugin) mismatches.push(`.claude-plugin/marketplace.json plugin entry version ${entry} ≠ ${want.plugin}`);
+  if (entry !== plugin) mismatches.push(`.claude-plugin/marketplace.json plugin entry version ${entry ?? "(none)"} ≠ plugin.json ${plugin}`);
+  if (has("README.md")) {
+    // [![plugin 0.3.0](https://img.shields.io/badge/plugin-0.3.0-1F3A5F)](...) — the
+    // number appears twice in one line, and both must agree with plugin.json.
+    const badge = read("README.md").match(/\[!\[plugin ([^\]]+)\]\(https:\/\/img\.shields\.io\/badge\/plugin-([^-]+)-/);
+    if (!badge) mismatches.push("README.md has no plugin version badge to check");
+    else if (badge[1] !== plugin || badge[2] !== plugin) {
+      mismatches.push(`README.md plugin badge ${badge[1]}/${badge[2]} ≠ plugin.json ${plugin}`);
+    }
+  }
+  if (want.plugin !== undefined && plugin !== want.plugin) {
+    mismatches.push(`.claude-plugin/plugin.json version ${plugin} ≠ ${want.plugin}`);
+  }
+
+  // --- each skill's own version, and its README line ----------------------
+  const skills = has("skills")
+    ? readdirSync(join(base, "skills"), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
+    : [];
+  const skillVersion = (name) => {
+    const p = `skills/${name}/SKILL.md`;
+    if (!has(p)) return null;
+    return read(p).match(/^ {2}version:\s*"?([^"\r\n]+)"?\s*$/m)?.[1] ?? null;
+  };
+  for (const name of skills) {
+    const have = skillVersion(name);
+    if (have === null) continue;                    // no SKILL.md version; the main validator reports that
+    const rp = `skills/${name}/README.md`;
+    if (!has(rp)) continue;                          // a skill need not ship a README
+    // "Version 0.1.0 · MIT · an Agent Skill by …" — the first such line in the file.
+    const line = read(rp).match(/^Version\s+(\S+)/m);
+    if (!line) mismatches.push(`${rp} has no "Version <v>" line to check`);
+    else if (line[1] !== have) mismatches.push(`${rp} Version ${line[1]} ≠ ${name}/SKILL.md ${have}`);
+  }
   for (const [name, v] of want.skills) {
     const p = `skills/${name}/SKILL.md`;
-    if (!existsSync(join(root, p))) { mismatches.push(`${p} missing`); continue; }
-    const have = read(p).match(/^  version:\s*"?([^"\r\n]+)"?\s*$/m)?.[1];
+    if (!has(p)) { mismatches.push(`${p} missing`); continue; }
+    const have = skillVersion(name);
     if (have !== v) mismatches.push(`${p} metadata.version ${have ?? "(none)"} ≠ ${v}`);
   }
+
   for (const m of mismatches) console.log(m);
   if (!mismatches.length) console.log("versions ok");
   return mismatches.length ? 1 : 0;
@@ -128,6 +169,13 @@ function checkSkill(name) {
   return { name, errors, warnings, description: data.description || "" };
 }
 
+// Everything below runs only when this file is the program. Imported (by
+// scripts/tests/check-versions.test.mjs) it is just a module, so importing it does
+// not validate the repository as a side effect.
+const invokedDirectly = process.argv[1] !== undefined
+  && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+if (!invokedDirectly) { /* imported for its exports */ } else {
+
 if (!existsSync(skillsDir)) {
   console.error("no skills/ directory");
   process.exit(1);
@@ -152,3 +200,5 @@ for (const r of results) {
 }
 console.log(`\n${results.length} skill(s), ${failed} failing`);
 process.exit(failed ? 1 : 0);
+
+}

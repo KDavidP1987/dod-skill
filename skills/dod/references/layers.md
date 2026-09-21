@@ -7,6 +7,11 @@ nightly job, checked `src/jobs/`"). The reviewer may contest any N/A.
 
 Probes marked **⛔ gating** block `ready` individually, even if the layer's other probes are answered.
 
+**Two rubrics.** rubric 1 = 45 probes and 7 gating. rubric 2 = 49 probes and 9 gating — it adds the four probes
+marked `(rubric 2)` below (4.5, 11.4, 12.4 ⛔, 14.4 ⛔). A plan's `rubric:` field says which one scores it
+(absent means 1); new plans are written at `rubric: 2`. The script holds the same numbers in its exported
+`RUBRIC` constant, and `--selftest` case `rubric-sync` fails if this file and that constant disagree.
+
 Coverage is reported at both levels over **applicable** layers and probes: `14/14 layers · 42/42
 probes` means one three-probe layer was N/A. N/A leaves the denominator; it never inflates the numerator.
 N/A is decided **per layer**; probe denominators are fixed (the counts below), so a single probe that
@@ -24,19 +29,20 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 ## 2. Actors & permissions
 - 2.1 ⛔ Every actor that can reach it (including unauthenticated, service accounts, admins) and what each may do.
 - 2.2 What happens on the unauthorized path — silent deny, error, redirect, audit entry.
-- 2.3 Ownership: who may see, change, or delete what someone else created.
+- 2.3 Ownership: who may see, change, or delete what someone else created, and what happens when ownership changes hands — a holder replaced mid-flight, a closed thing legitimately reopened.
 
 ## 3. Inputs, outputs & data
 - 3.1 Every input: shape, limits, validation, and the response to invalid input.
 - 3.2 Every output and side effect, including what other systems receive.
-- 3.3 ⛔ Persistence: what is stored, where, who owns it, how long it is kept, how it is deleted.
+- 3.3 ⛔ Persistence: what is stored, where, who owns it, how long it is kept, how it is deleted — for every artifact the feature produces, including by-products (logs, working directories, intermediates), and which of them exist only once.
 - 3.4 Migration of existing data, if the shape changes.
 
 ## 4. Business rules & invariants
-- 4.1 Calculations, thresholds, and policies stated precisely enough to write a test from.
+- 4.1 Calculations, thresholds, and policies stated precisely enough to write a test from, and which document is authoritative for a threshold stated in two places.
 - 4.2 Invariants that must never be violated (uniqueness, ordering, balance, totals).
 - 4.3 Temporal rules — time zones, cut-offs, expiry, retroactive changes.
 - 4.4 ⛔ Precedence when rules conflict, and who decides an exception.
+- 4.5 (rubric 2) “Every X” sets: for every rule of the form “every X”, how X is computed, what valid content the computation misses, and who checks the computation.
 
 ## 5. Internal interfaces
 - 5.1 What it reads from other features/modules, with paths or symbols.
@@ -44,14 +50,14 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 5.3 Shared types, events, schemas or contracts it introduces or alters.
 
 ## 6. External dependencies & contracts
-- 6.1 Every external API, service, package, or vendor it depends on — version, quota, cost.
-- 6.2 ⛔ Behaviour when each dependency is slow, down, rate-limited, or returns garbage.
+- 6.1 Every external API, service, package, or vendor it depends on — version, quota, cost — and every input contract sampled across all its record types, not only the ones the feature expects.
+- 6.2 ⛔ Behaviour when each dependency is slow, down, rate-limited, or returns garbage, including internal collaborators — sibling agents and your own tools.
 - 6.3 Sandbox / test-mode behaviour and how it is kept out of production.
 
 ## 7. States & lifecycle
 - 7.1 Empty, first-run, loading, partial, and error states.
-- 7.2 Concurrent use — two users, two tabs, a retry racing the original.
-- 7.3 Stale data, cancel, undo, and re-entry after interruption.
+- 7.2 Concurrent use — two users, two tabs, a retry racing the original — and which of these actors is you: the planner, the orchestrator, the build tooling.
+- 7.3 Stale data, cancel, undo, and re-entry after interruption, and what a correction invalidates.
 
 ## 8. Minimal stretch
 - 8.1 The least a user can do: empty input, one item, defaults only, skipping optional steps.
@@ -72,20 +78,23 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 11.1 Where it lives in the product and how a user discovers it.
 - 11.2 Feedback: progress, success, failure, and empty-result messaging in the product's voice.
 - 11.3 Accessibility (keyboard, screen reader, contrast) and small-screen behaviour.
+- 11.4 (rubric 2) Activation: how the feature is invoked or activated when nobody asks for it — a trigger, a pointer line, a hook, a schedule — and what shows it was.
 
 ## 12. Failure handling & observability
 - 12.1 What the user sees for each failure class, and what they can do next.
 - 12.2 What is logged or measured, with enough context to debug without reproducing.
 - 12.3 How you would know in production that it is broken — the alert or the dashboard.
+- 12.4 ⛔ (rubric 2) Failing case: for every check the plan introduces, the input that makes it report a failure, the input it must stay silent on, and what it prints on an empty input — which must not read as a pass.
 
 ## 13. Performance & scale
 - 13.1 The latency or throughput budget, and the hot path that decides it.
-- 13.2 Limits and pagination — what is bounded and what happens at the bound.
+- 13.2 Limits and pagination — what is bounded and what happens at the bound, the case a limit came from, and the valid case it excludes.
 
 ## 14. Rollout & compatibility
 - 14.1 How it ships: flag, staged, all at once; who can turn it off.
 - 14.2 Backward compatibility with existing clients, data, and integrations.
 - 14.3 ⛔ Rollback: the exact steps to undo it, and whether they are still possible after data has been written.
+- 14.4 ⛔ (rubric 2) Paths walked: every path the change ships, writes or regenerates, found by walking the Build plan step by step — generated indexes, tooling, fixtures, notes and the plan store itself.
 
 ## 15. Out of scope
 - 15.1 What was explicitly considered and excluded, so a builder does not fill the gap by guessing.
@@ -124,6 +133,22 @@ apply. Silence is a Gap for the reviewer to raise.
 
 State the size and the test that produced it in the plan header. The user may override. A change that
 is smaller than S (a typo, a one-line fix) does not need this skill — say so and stop.
+
+### Backlog plans
+
+`kind: backlog` is for a slice of work on a system that already exists — the next items off the user's
+backlog, not a new feature.
+- **Scope is the slice, not the system.** The Definition of Done names what this slice must make true; the
+  parts of the system it does not touch are context, not items. Size the slice, not the product.
+- **Recon reads the existing system and the user's backlog.** Read the modules the slice touches and the
+  backlog entries it comes from (issue, list, ticket). Items that already pass in the existing system are
+  verified **at approve time**: record their `pass` lines before the `→ ready` transition — the report counts
+  them as pre-verified, apart from the items this build makes pass, so the prediction rate is not inflated.
+- **Probes that typically become N/A**, each with the applicability test to write in the row: 1 (the purpose
+  is the system's — test: the slice adds no new user or job), 8.2 (one-time use — test: the slice adds no
+  first-run or setup path), 11 (design & UX — test: the slice changes no screen, message or command a person
+  reads), 15.2 (deferred decisions — test: nothing in the slice was postponed). Anything the slice touches
+  is still scored in full.
 
 ## Epic plans — how the rubric applies to a composite
 
