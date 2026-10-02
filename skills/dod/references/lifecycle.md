@@ -20,7 +20,7 @@ transitions must be legal (plan-template.md invariant 6). Read this file before 
 | From | Command | To | Requires | Writes |
 |---|---|---|---|---|
 | — | `plan` | `draft` | request; recon; layer pass | plan file, `status → draft` |
-| `draft` | `approve` | `ready` | concurrence (review.md); no `decision-required` assumptions; no gating probe open; gate passed | `## Baseline` = frozen copy of DoD; `baselined`, `review`, both coverage fields; `status → ready` |
+| `draft` | `approve` | `ready` | concurrence (review.md); no `decision-required` assumptions; no gating probe open; gate passed | `## Baseline` = frozen copy of DoD; `baselined`, `review`, both coverage fields; `status → ready`. From 2026-10-02 every `test` and `cmd` item of the Baseline needs a dry-run note before this line (plan-template.md › Calibration) |
 | `ready` | `start` | `in-progress` | user says work has begun (or the builder is about to begin) | `status → in-progress` |
 | `in-progress` | `status` | *(no change)* | — | evidence lines for anything verified; warnings. Does not change lifecycle state or product code; it does run evidence commands and append to the tracker |
 | `in-progress` | `amend` | *(no change)* | kind, ops, layer, why | amendment line; DoD edited to match ops; if `layer:` is a gating probe or ops contain `-Dn` → `review: pending` and a re-review is owed (below) |
@@ -112,7 +112,9 @@ and only hides which layer missed.
 `rubric: 2` plan, 12.4 and 14.4) or the ops remove
 an item (`-Dn`), set `review: pending` and tell the user a re-review is owed before `close`. A re-review
 is a fresh independent review per review.md — redacted current plan, new `## Review n` appended, findings
-dispositioned. Regenerate the review page first (`dod-wbs.mjs --html <slug> --review`) and name its path in
+dispositioned. Build it with `--review-prompt <slug> --scope An` (several: `--scope A3,A5`) so the reviewer
+grades the amendment and treats the rest as frozen context; a READY clears the amendments its scope names,
+and an unscoped READY clears all of them. Regenerate the review page first (`dod-wbs.mjs --html <slug> --review`) and name its path in
 the request, so the reviewer reads the current plan rather than a page left over from the last round. If it is READY, set `review:` to that reviewer, `coverage_reviewer` to its line, and log
 `- <date> · note · re-review An · Review n READY`. It is not a transition and `approve` does not run again;
 the plan stays `in-progress` throughout. The script will not allow `done` without a READY review dated
@@ -173,6 +175,7 @@ Corrected (reversals)      0            (counts in the rate)
 Requested scope changes    2    (excluded)
 Emergent / defect / external 0 · 1 · 0  (excluded)
 Prediction rate            12 / (12 + 1) = 92 %   target ≥ 90 %
+Rework                     <r> of <m> misses corrected an earlier amendment
 Completion                 vs baseline 11/12 (D5 removed by A2 · requested) · vs current 13/13
 Review                     codex · 2 rounds · author 14/14 layers · reviewer 14/14 layers
 Timeline                   draft 09-14 · ready 09-15 · start 09-15 · done 09-19
@@ -190,6 +193,9 @@ answers or more probes.
 the design that turned out to be needed (excluding scope the user chose to change), how much did the
 plan foresee? Target 90–95 %. Below 90 % is not a failure of the builder — it is a finding about the
 layer probes, and the missed probes line says which.
+
+**Rework** counts the discovered and corrected amendments that carry `reworks: A<k>` — a miss whose fix was itself
+wrong and had to be fixed again (plan-template.md › Calibration). The rework line stands beside the rate, never instead of the rate.
 
 `dod-index.mjs` aggregates across `done` plans as Σ baseline ÷ (Σ baseline + Σ discovered) — raw counts,
 one rounding — and lists the most-missed layers for done plans (with open plans shown separately as
@@ -211,6 +217,19 @@ are shown) and is the same dishonesty as mislabelling an amendment.
   `node <skill>/scripts/dod-index.mjs --migrate --to 1 <slug>` on each `dod: 2` plan — it removes titles,
   renames `S-n` back to `A-n` and sets `dod: 1`, in the `## Baseline` copy too — then `--strip-v2` for the other v0.2 forms (it runs the
   `--to 1` step itself on any plan still at `dod: 2`), then `--check` each plan with the older install.
+
+## Siblings in one store
+
+A store may hold any number of open children of one epic at once, and two of them may be built in the same
+interval of commits. Which commit belongs to which child is not a guess from the message or the date: **a
+commit is a child's exactly when it touches a path that child's Rollout 14.4 inventory marks `exclusive`.** A
+sibling's plan file, its reviews file and the generated index are `shared` — touching them makes a commit
+nobody's — and a checker that computes "this child's commits" any other way is wrong. A commit that touches
+only shared paths plus a file nobody declared is foreign to every child that did not declare it: it is the
+owning child's to declare, and that child's own walk is where it fails. The rule came from three amendments
+of the first plan built beside a sibling (wbs-view A24 — ownership by exclusive path; A29 — the store check
+accepts a sibling the epic announced; A30 — the paths walk counts a sibling's commit as other work) and is
+stated here once so that no later checker re-derives it.
 
 ## Wording — the reader's level
 

@@ -1,0 +1,97 @@
+name: Plan feedback
+description: Send the numbers of one closed dod plan — the same fields `dod-feedback.mjs --send` fills in for you.
+title: "dod feedback: "
+labels: [dod-feedback]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One closed plan per report. Copy the values from the plan's `## Report` (or run `node skills/dod/scripts/dod-feedback.mjs --draft <slug>` and paste its lines).
+        Numbers and probe ids only — never paste a token, a private path or your code.
+  - type: input
+    id: dod-version
+    attributes:
+      label: dod version
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: size
+      options: [S, M, L, Epic, unknown]
+    validations:
+      required: true
+  - type: input
+    id: kind
+    attributes:
+      label: kind
+      placeholder: feature
+  - type: input
+    id: prediction-rate
+    attributes:
+      label: prediction rate
+      placeholder: "29 / (29 + 10) = 74 %"
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: target
+      placeholder: "90 %"
+  - type: dropdown
+    id: result
+    attributes:
+      label: result
+      options: [success, below target, not measured]
+    validations:
+      required: true
+  - type: input
+    id: baseline-items
+    attributes:
+      label: baseline items
+  - type: input
+    id: discovered-design-changes
+    attributes:
+      label: discovered design changes
+  - type: input
+    id: requested
+    attributes:
+      label: requested
+  - type: input
+    id: defect
+    attributes:
+      label: defect
+  - type: input
+    id: external
+    attributes:
+      label: external
+  - type: input
+    id: missed-probes
+    attributes:
+      label: missed probes
+      placeholder: "14.4, 12.4"
+  - type: input
+    id: review-rounds
+    attributes:
+      label: review rounds
+  - type: dropdown
+    id: reviewer
+    attributes:
+      label: reviewer
+      options: [codex, subagent, human, other, pending]
+  - type: input
+    id: coverage-author
+    attributes:
+      label: coverage author
+      placeholder: "15/15 layers · 49/49 probes"
+  - type: input
+    id: coverage-reviewer
+    attributes:
+      label: coverage reviewer
+      placeholder: "15/15 layers · 49/49 probes"
+  - type: textarea
+    id: why-the-plan-missed
+    attributes:
+      label: Why the plan missed
+      description: Optional. One line per discovered amendment — its probe and what the plan did not see. Leave out anything private.

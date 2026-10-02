@@ -42,12 +42,12 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 4.2 Invariants that must never be violated (uniqueness, ordering, balance, totals).
 - 4.3 Temporal rules — time zones, cut-offs, expiry, retroactive changes.
 - 4.4 ⛔ Precedence when rules conflict, and who decides an exception.
-- 4.5 (rubric 2) “Every X” sets: for every rule of the form “every X”, how X is computed, what valid content the computation misses, and who checks the computation.
+- 4.5 (rubric 2) “Every X” sets: for every rule of the form “every X”, how X is computed, what valid content the computation misses, who checks the computation — and, when a tool derives X (a grep, a diff, a directory walk), whether that tool can see every member at the moment it runs: a file not yet tracked, a file this build creates, a path the tool excludes.
 
 ## 5. Internal interfaces
 - 5.1 What it reads from other features/modules, with paths or symbols.
 - 5.2 What it writes to or changes about other features, and what breaks there if this is wrong.
-- 5.3 Shared types, events, schemas or contracts it introduces or alters.
+- 5.3 Shared types, events, schemas or contracts it introduces or alters — each field enumerated against what the code emits or reads, not against the prose that describes it.
 
 ## 6. External dependencies & contracts
 - 6.1 Every external API, service, package, or vendor it depends on — version, quota, cost — and every input contract sampled across all its record types, not only the ones the feature expects.
@@ -69,7 +69,7 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 9.3 Repeated or parallel use of the same action — idempotency, duplicates, double-submit.
 
 ## 10. Security & privacy
-- 10.1 ⛔ Authorization checked on every path, including indirect ones (jobs, webhooks, exports).
+- 10.1 ⛔ Authorization checked on every path, including indirect ones (jobs, webhooks, exports) — and an allowed program's options that change what runs (`git --upload-pack`, `npm --script-shell`, `node --require`) are the same boundary as the program itself.
 - 10.2 Injection and unsafe content on every input that reaches a query, shell, template, or URL.
 - 10.3 ⛔ Secrets and credentials: where they live, how they rotate, what must never be logged.
 - 10.4 Personal data: what is collected, minimised, exposed in logs or exports, and the audit trail.
@@ -78,13 +78,14 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 11.1 Where it lives in the product and how a user discovers it.
 - 11.2 Feedback: progress, success, failure, and empty-result messaging in the product's voice.
 - 11.3 Accessibility (keyboard, screen reader, contrast) and small-screen behaviour.
-- 11.4 (rubric 2) Activation: how the feature is invoked or activated when nobody asks for it — a trigger, a pointer line, a hook, a schedule — and what shows it was.
+- 11.4 (rubric 2) Activation: how the feature is invoked or activated when nobody asks for it — a trigger, a pointer line, a hook, a schedule — and what shows it was; the should-not-activate cases are unrelated to the feature's purpose, never adjacent to it — an agent that has just finished an adjacent task invokes it for a good reason.
 
 ## 12. Failure handling & observability
 - 12.1 What the user sees for each failure class, and what they can do next.
 - 12.2 What is logged or measured, with enough context to debug without reproducing.
 - 12.3 How you would know in production that it is broken — the alert or the dashboard.
-- 12.4 ⛔ (rubric 2) Failing case: for every check the plan introduces, the input that makes it report a failure, the input it must stay silent on, and what it prints on an empty input — which must not read as a pass.
+- 12.4 ⛔ (rubric 2) Failing case: for every check the plan introduces, the input that makes it report a failure, the input it must stay silent on, and what it prints on an empty input — which must not read as a pass; one evidence command per gating probe, able to fail for its stated `fails when`; and a selftest fixture spells what the real input spells and plants the state the real run produces, never a corrected copy of either. Each failing input was run once against the real check before approval, with its output recorded (a dry-run note), and every tolerance, threshold and expected output a check uses cites its source: three real runs with their spread, a specification, or a `reversible` assumption with a `fallback:`.
+  Scoring (kept off the score-redacted review page, which shows the line above): a failing case never run is a Gap.
 
 ## 13. Performance & scale
 - 13.1 The latency or throughput budget, and the hot path that decides it.
@@ -93,8 +94,8 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 ## 14. Rollout & compatibility
 - 14.1 How it ships: flag, staged, all at once; who can turn it off.
 - 14.2 Backward compatibility with existing clients, data, and integrations.
-- 14.3 ⛔ Rollback: the exact steps to undo it, and whether they are still possible after data has been written.
-- 14.4 ⛔ (rubric 2) Paths walked: every path the change ships, writes or regenerates, found by walking the Build plan step by step — generated indexes, tooling, fixtures, notes and the plan store itself.
+- 14.3 ⛔ Rollback: the exact steps to undo it, whether they are still possible after data has been written, and the commit range they cover when the change is committed more than once.
+- 14.4 ⛔ (rubric 2) Paths walked: every path the change ships, writes or regenerates, found by walking the Build plan step by step — generated indexes, tooling, fixtures, notes, ignored and generated files, the shipped files a release has to touch, the paths the review process itself writes (review pages, re-review records) and the plan store itself.
 
 ## 15. Out of scope
 - 15.1 What was explicitly considered and excluded, so a builder does not fill the gap by guessing.
@@ -180,3 +181,15 @@ inherited N/A with its reason — the profile is a prompt, not an exemption.
 The same file carries the `## Audience` section — the reader's level per technology, written once by
 `setup` and read by every `plan` (`references/audience.md`). It changes how questions and prose are
 worded, never what a layer requires; the probes above are scored exactly the same at every level.
+
+**Project probes and the miss history.** Rows under `## Project probes` are `- <n>.<m> · <what the plan must state>`.
+`dod-index.mjs` adds them to the store's miss history: every probe named by the `layer:` of a discovered or
+corrected amendment in two or more done plans. `--check` prints the history after its numbers line, the index
+carries it as `Miss history — done plans: …`, and a plan approved from 2026-10-02 must show an observed dry run
+(not `n/a`) on at least one item that answers each history probe (plan-template.md › Calibration).
+
+**`## Host`.** One row per fact about the machine the checks run on — `- <name> · <value> · measured <YYYY-MM-DD>`
+(`platform`, `node`, `git`, `shell` are the usual four), each value copied from a spike run on that host and
+quoted in the plan's Log as `note · spike · <command> → <output>`. `--profile` prints `host: <n> rows · measured
+<date>` or `host: not set`, and `✗ host: <reason>` for a broken row. Platform and version strings only — never a
+user or machine name.

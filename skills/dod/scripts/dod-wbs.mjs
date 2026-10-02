@@ -403,7 +403,19 @@ export function writeUnderStore(storeDir, target, text, { now = Date.now, before
   }
   closeSync(fd);
   if (beforeRename) beforeRename({ tmp, real });
+  // plan-limits D4 (wbs-view F2): the target is classified AGAIN immediately before the rename, because the first
+  // check was made before the temp file was written and a plan, the index, a reviews file or a link can have
+  // arrived at the path since. A refusal here removes the temp and throws the same named line. What remains is
+  // the rename call itself — the platform's atomic replace — and that residue is stated, not hidden.
+  let again;
+  try { again = classifyTarget(storeDir, target); }
+  catch (e) { try { unlinkSync(tmp); } catch { /* already gone */ } throw e; }
+  if (again !== real) { try { unlinkSync(tmp); } catch { /* already gone */ } fail("link", { path: plainText(target) }); }
   renameSync(tmp, real); // the publication is the rename: a reader sees the old file or the new one (D10)
+  // ... and what is at the path after the rename is a regular file, or the writer says so rather than "written"
+  let after = null;
+  try { after = lstatSync(real); } catch { /* vanished */ }
+  if (!after || !after.isFile()) fail("link", { path: plainText(target) });
   return real;
 }
 
@@ -1531,13 +1543,70 @@ assertion("export.race", "export", (expect) => {
   // Everything above is observation, and a synchronous test cannot observe tearing: replacing the rename with
   // a plain write to the target passes every read, because no read ever lands mid-write. So assert the
   // property that makes tearing impossible instead — the published file is a DIFFERENT file, not the same one
-  // rewritten in place. A rename swaps the directory entry, so the identity changes; an in-place write keeps
-  // it, and a reader holding the old handle watches it change under them.
-  const beforeIno = statSync(target).ino;
-  writeUnderStore(dir, target, textB);
-  const afterIno = statSync(target).ino;
-  expect("export.race-publication-is-a-rename", beforeIno !== 0 && afterIno !== beforeIno,
-    `the target kept file id ${beforeIno} — it was rewritten in place, not replaced`);
+  // rewritten in place. plan-limits D6: the oracle is a reader's handle, which is the property D10 promises —
+  // a handle opened before the publication NEVER reads the new text. On POSIX it keeps reading the old text
+  // while the path reads the new; on Windows the platform refuses to rename over a file with an open handle
+  // (EPERM — plan-limits A2, measured), so the publication throws and the path still holds the old whole text.
+  // Either outcome is "old or new, never torn, never rewritten in place". (The NTFS file id this case compared
+  // until dod-0-3-probes' D10 run 1 was reused about one run in six.)
+  // textB above equals textA byte for byte (same store, same render), so the oracle needs a text that differs
+  const textC = `${textA}# republished\n`;
+  const held = openSync(target, "r");
+  let renameOutcome = "written";
+  try { writeUnderStore(dir, target, textC); } catch (e) { renameOutcome = e.code ?? e.message; }
+  const throughHandle = readFileSync(held, "utf8"); closeSync(held);
+  const atPath = readFileSync(target, "utf8");
+  const published = renameOutcome === "written" && atPath === textC;
+  const refused = renameOutcome !== "written" && atPath === textA;
+  expect("export.race-publication-is-a-rename", throughHandle === textA && (published || refused),
+    `handle reads ${throughHandle === textA ? "old" : throughHandle === textC ? "NEW — rewritten in place" : "neither"}; rename ${renameOutcome}; path reads ${atPath === textC ? "new" : atPath === textA ? "old" : "neither"}`);
+  // a refused rename leaves its temp for the sweep (6.2 of plan-limits): the next writer's sweepTemps removes it
+  sweepTemps(dir, Date.now() + SWEEP_MS + 60_000);
+  expect("export.race-temp-swept-after-refused-rename", readdirSync(dir).filter((f) => /\.tmp$/.test(f)).length === 0, "the sweep left a temp file behind");
+  // negative control: an in-place write must FAIL the same oracle, or the oracle passes whatever the writer did
+  const inPlace = join(dir, "in-place.csv");
+  writeFileSync(inPlace, textA);
+  const held2 = openSync(inPlace, "r");
+  writeFileSync(inPlace, textC);
+  const throughHandle2 = readFileSync(held2, "utf8"); closeSync(held2);
+  expect("export.race-oracle-in-place", throughHandle2 !== textA && readFileSync(inPlace, "utf8") === textC,
+    "an in-place rewrite left the old handle reading the old text — the oracle cannot tell a rename from a rewrite");
+});
+
+assertion("export.race-final-target", "export", (expect) => {
+  // plan-limits D4 (wbs-view F2): a plan file or a link planted at the target AFTER the first check and the temp
+  // write — the `beforeRename` window — is refused by name; nothing is renamed over it and no temp survives
+  const dir = makeStore({ "p.md": planText("p", { items: I(1) }) });
+  // a .md that is not a plan is an allowed destination (export.allow-non-plan-md) — and the one place a planted
+  // plan can appear, since classifyTarget judges plans by name and content
+  const target = join(dir, "notes.md");
+  const planted = planText("q", { items: I(1) });
+  let outcome;
+  try { writeUnderStore(dir, target, "payload", { beforeRename: () => writeFileSync(target, planted) }); outcome = "written"; }
+  catch (e) { outcome = e instanceof WbsError ? e.line : `threw ${e.code ?? e.message}`; }
+  expect("export.race-final-target", outcome === fmt("isPlan", { path: plainText(target) }) && readFileSync(target, "utf8") === planted,
+    `outcome ${JSON.stringify(outcome)}; target ${readFileSync(target, "utf8") === planted ? "intact" : "CLOBBERED"}`);
+  expect("export.race-final-target-no-temp", readdirSync(dir).filter((f) => /\.tmp$/.test(f)).length === 0, "a temp file survived the refusal");
+  // ... and a link planted there is the `link` line, with the link's own target untouched
+  rmSync(target);
+  const inside = join(dir, "real.csv");
+  writeFileSync(inside, "before");
+  let linkOutcome;
+  try {
+    writeUnderStore(dir, target, "payload", { beforeRename: () => symlinkSync(inside, target, "file") });
+    linkOutcome = "written";
+  } catch (e) { linkOutcome = e instanceof WbsError ? e.line : `threw ${e.code ?? e.message}`; }
+  if (linkOutcome.startsWith("threw EPERM") || linkOutcome.startsWith("threw EACCES")) {
+    expect("export.race-final-target-link", false, `symlink unavailable: ${linkOutcome}`);
+  } else {
+    expect("export.race-final-target-link", linkOutcome === fmt("link", { path: plainText(target) }) && readFileSync(inside, "utf8") === "before",
+      `outcome ${JSON.stringify(linkOutcome)}; link target ${readFileSync(inside, "utf8") === "before" ? "intact" : "WRITTEN THROUGH"}`);
+  }
+  expect("export.race-final-target-link-no-temp", readdirSync(dir).filter((f) => /\.tmp$/.test(f)).length === 0, "a temp file survived the refusal");
+  // ... and the first-ever export — no target yet, so no old handle to hold — publishes whole with no temp left
+  const fresh = join(dir, "first.csv");
+  writeUnderStore(dir, fresh, "first");
+  expect("export.race-first-export", readFileSync(fresh, "utf8") === "first" && readdirSync(dir).filter((f) => /\.tmp$/.test(f)).length === 0, "the first export left a temp or a partial file");
 });
 
 assertion("export.race-pages", "export", (expect) => {
@@ -2293,10 +2362,10 @@ assertion("bounds.usage", "bounds", (expect) => {
 });
 
 assertion("bounds.limits-report", "bounds", (expect) => {
-  // A9: D31 used to say these three were REFUSED and surfaced as D27's `does not parse`. They are not —
-  // dod-index.mjs's LIMITS reports each as a warning, blanks an over-long line, and lets the plan parse and
-  // render. That was found by probing rather than by reading, and it is asserted the same way: the plans go
-  // into a store, the store is rendered, and the warnings come from checkPlan, which is what `--check` prints.
+  // A9: D31 used to say these three were REFUSED and surfaced as D27's `does not parse`. They are not. Since
+  // plan-limits D1 the over-long line is a PROBLEM in checkPlan and the line is parsed as written (it used to be a
+  // warning and the line was blanked); size and item count stay warnings. Asserted the same way as before: the
+  // plans go into a store, the store is rendered, and problems and warnings come from checkPlan.
   const LONG = "y".repeat(12000);
   const dir = makeStore({
     "big.md": planText("big", { items: I(2), extra: `<!-- ${"x".repeat(1024 * 1024 + 1000)} -->\n\n` }),
@@ -2306,14 +2375,15 @@ assertion("bounds.limits-report", "bounds", (expect) => {
   const store = readStore(dir);
   const by = Object.fromEntries(store.plans.map((p) => [p.slug, p]));
   const warnsOf = (slug) => checkPlan(by[slug], store.plans).warnings;
+  const problemsOf = (slug) => checkPlan(by[slug], store.plans).problems;
   expect("bounds.limit-1mb", warnsOf("big").includes("plan exceeds 1 MB"), JSON.stringify(warnsOf("big")));
   expect("bounds.limit-items", warnsOf("many").includes("plan exceeds 500 items"), JSON.stringify(warnsOf("many")));
-  expect("bounds.limit-line", warnsOf("longline").some((w) => /^line \d+ is over 10,000 characters — skipped$/.test(w)),
-    JSON.stringify(warnsOf("longline")));
-  // the over-long line is blanked, not truncated to a prefix, and the section after it still parses — which
-  // is the whole reason blanking is the response rather than dropping the line
-  expect("bounds.long-line-blanked",
-    !JSON.stringify(by.longline.sections).includes("yyyy") && "After the long line" in by.longline.sections,
+  expect("bounds.limit-line", problemsOf("longline").some((p) => /^line \d+ is over 10,000 characters$/.test(p))
+    && !warnsOf("longline").some((w) => /10,000/.test(w)), JSON.stringify([problemsOf("longline"), warnsOf("longline")]));
+  // the over-long line is parsed as written (plan-limits D1) — not blanked, not truncated — and the section after
+  // it still parses
+  expect("bounds.long-line-parsed",
+    JSON.stringify(by.longline.sections).includes("yyyy") && "After the long line" in by.longline.sections,
     JSON.stringify(Object.keys(by.longline.sections)));
   // and all three still render, with their real item counts: reported is not refused
   const out = runHtml(dir, "--wbs");

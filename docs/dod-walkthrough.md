@@ -218,3 +218,66 @@ resolve (a rename-target race in the export writer, and a package check that pro
 leaf without proving the leaf owns it) are carried to a 0.3.0 plan rather than dispositioned away. The 0.1
 example above scored 75 % on 45 probes; the 0.2.0 example scored 54 % on 49 because the four new probes,
 and the map that forces every probe to name its item, catch what a coverage line could hide.
+
+## What changed in 0.3.0
+
+Two more skills were planned and built under `rubric: 2` to see whether the 0.2.0 probes predict a build:
+claim-check and readme-verify each closed at **76 %**, and the release of 0.2.0 itself closed at **66 %**. The
+misses did not spread across the rubric — they landed on seven probes, and each miss was a case the probe's
+wording let the author skip. 0.3.0 sharpens those seven sentences inside rubric 2: it is **still 49 probes,
+9 gating**, no plan changes its `rubric:` line, and a plan written before 0.3.0 checks exactly as it did. What
+changed is what the author is asked, not how the answer is scored.
+
+- **4.5 “Every X” sets** — now asks, when a tool derives X (a grep, a diff, a directory walk), whether that
+  tool *can see every member at the moment it runs*: a file not yet tracked, a file this build creates, a path
+  the tool excludes. Why: release-0-2 A9 and A10 — the privacy and staleness scans were `git grep` and
+  `git diff`, which read tracked files only, so the new checker scanned everything except itself until it
+  was committed.
+- **5.3 Shared types, events, schemas or contracts** — now *each field enumerated against what the code emits
+  or reads, not against the prose that describes it*. Why: readme-verify A4 — the record's field list was
+  written from the plan's own description and omitted an `output` field the script already emitted.
+- **10.1 Authorization on every path** — now names an allowed program's *run-changing options* (`git
+  --upload-pack`, `npm --script-shell`, `node --require`) as the same boundary as the program itself. Why:
+  readme-verify A7 — an allowlist matched the program's name as a prefix and let the option through.
+- **11.4 Activation** — now says the should-not-activate cases are *unrelated* to the feature's purpose,
+  *never adjacent to it*: an agent that has just finished an adjacent task invokes the feature for a good
+  reason. Why: readme-verify A3 — "write a README" was listed as a should-not prompt, and in three runs the
+  agent wrote the README and then, reasonably, verified it.
+- **12.4 Failing case** — now asks for *one evidence command per gating probe*, able to fail for its stated
+  `fails when`, and for a selftest fixture that *spells what the real input spells and plants the state the
+  real run produces*, never a corrected copy of either. Why: readme-verify A5 and A6 (four commands where one
+  was promised; an evidence command that could not fail for its own fails-when), release-0-2 A11 (a fixture
+  that corrected the `join("skills", name)` it was copying, so the real script's bug passed) and A13 (a plant
+  that produced a state the real run never produces).
+- **14.3 Rollback** — now asks for *the commit range the steps cover when the change is committed more than
+  once*. Why: release-0-2 A14 — one content commit became three under the checker fixes, and "revert the
+  content commit" had two readings; the range starts at the first.
+- **14.4 Paths walked** — now lists what the walk must include: *ignored and generated files, the shipped files
+  a release has to touch, the paths the review process itself writes* (review pages, re-review records) and
+  the plan store. Why: readme-verify A1 and A2 (the review page and the re-review record were written into
+  the store by the process and declared by nobody) and release-0-2 A12 (a shipped file's fixture lines hit
+  the privacy scan).
+
+Three more children shipped in 0.3.0 alongside the sharpened probes.
+
+- **Plan limits** — a line over 10,000 characters is now a `--check` problem: the check fails and the line is
+  parsed as written. A plan over 1 MB or 500 items still gets only a warning. The longest line in a real plan so far
+  is under 7,000 characters.
+- **The review loop** — one command builds the reviewer prompt, `dod-index.mjs --review-prompt <slug>`, and prints
+  the heading to record the review under; `--scope A<n>` re-reviews only the amendments it names and the probes
+  they touch. Three codex or subagent rounds is the cap: a fourth needs the owner's round-cap note in the plan's
+  Log, which the agent never writes for them. For a run that keeps saying REVISE, `--check` prints a stopping
+  signal that says when the findings have reached build-level detail and a human review would serve better than
+  another round.
+- **Calibration** — four additions that measure the plan against its own build. From 2026-10-02 every `test` and
+  `cmd` item needs a dry-run note before approval (its command, run once on the draft, and what it printed);
+  `--check` shows the store's miss history — the probes earlier plans missed — beside the coverage line, and asks
+  for deeper evidence on those probes; an amendment that corrects an earlier one carries `reworks: A<n>`, and the
+  report counts it; and `profile.md` gains a `## Host` section for the platform the live checks run on. The plan
+  is shipped as the 0.3.0 example, [`dod/calibration.md`](dod/calibration.md). It closed at **74 %**, below the
+  75 % floor, and its report says why: the build started five days after approval, and eight of its ten design
+  changes came from sibling plans that landed in that gap. Its own dry-run notes, the first use of the rule it
+  adds, caught two of those changes before any code was written.
+The third test of the rubric is the plan that measures this change: a new small skill planned after these
+sentences shipped, which has to close at 90 % or better. The plan for the change itself, with its three Codex
+rounds and the owner's review, is [`dod/dod-0-3-probes.md`](dod/dod-0-3-probes.md).

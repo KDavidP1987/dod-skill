@@ -17,7 +17,7 @@
 // In grammar-controlled sections (Definition of Done, Baseline, Coverage, Assumptions, Amendments, Children, Log)
 // a bullet or table row that does not match the grammar is a problem, not prose.
 
-import { accessSync, appendFileSync, chmodSync, closeSync, constants as FS, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, lstatSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, closeSync, constants as FS, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, lstatSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -121,6 +121,9 @@ export const MESSAGES_WBS = {
   unknownId: "<Wid> names <id>, which is not an item or a step",
   addsNoPackage: "<An> adds <Dn> but names no work package",
   unknownPackage: "<An> names package <Wid>, which is not a leaf work package",
+  // plan-limits D5 (wbs-view F4): the named leaf must LIST the item, or the growth lands on a package that did not grow
+  growthElsewhere: "<An> names package <Wid> but <Dn> is owned by <Wother>",
+  growthUnowned: "<An> names package <Wid> but <Dn> is owned by no package",
 };
 export const fmtW = (key, vals = {}) => MESSAGES_WBS[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
 // A title is `**<title>** ` at the start of a statement: 1–40 code points, no `*`, no `·`, no line break, not blank.
@@ -155,7 +158,7 @@ const LEGAL = { draft: [null], ready: ["draft"], "in-progress": ["ready", "done"
 
 const RE = {
   item: /^- \[( |x|X)\] (D\d+) · (.+?) · (test|cmd|file|manual): (.*)$/,
-  amendment: /^- (A\d+) · (\d{4}-\d{2}-\d{2}) · (discovered|corrected|requested|emergent|defect|external) · (.+?) · layer: ([^·]+?) · (?:package: (W\d+\.\d+) · )?(.+)$/,
+  amendment: /^- (A\d+) · (\d{4}-\d{2}-\d{2}) · (discovered|corrected|requested|emergent|defect|external) · (.+?) · layer: ([^·]+?) · (?:package: (W\d+\.\d+) · )?(?:reworks: (A\d+) · )?(.+)$/,
   // a parent package has a title and nothing else; a leaf carries both `items:` and `steps:`, each non-empty
   package: /^- (W\d+(?:\.\d+)?) · \*\*([^*·]{1,40})\*\*(?: · items: (D\d+(?: D\d+)*) · steps: (\d+(?:, ?\d+)*))?\s*$/,
   step: /^(\d+)\. \S/,
@@ -176,17 +179,37 @@ const RE = {
   finding: /^(?:\d+\.\s*|-\s*)?\**F(\d+)\b/,
   disposition: /^- F(\d+) · (accepted|rejected) · /,
   coverageLine: /^(\d+)\/(\d+) layers · (\d+)\/(\d+) probes$/,
+  // review-loop D1: a probe token is <layer>.<probe> — layer 1–15, probe 1–5 — with no letter, digit or "." on
+  // either side, so a version string (v0.3.1) or a dotted section number (1.2.3) never reads as a probe
+  probeToken: /(?<![A-Za-z0-9.])(1[0-5]|[1-9])\.([1-5])(?![A-Za-z0-9.])/g,
+  tagWord: /\b(blocking|advisory)\b/i,
 };
+// review-loop D1: the tag is the first whole word "blocking" or "advisory" STARTING within this many characters
+// after a finding's F<n> token. Every tagged finding of the 2026-09-26 sample starts 1–5 characters out; the one
+// word further out is body text (a human "no blocking gap" at 23), which a wider window would mis-tag.
+const TAG_WINDOW = 8;
+// one probe with the same boundary, as the convergence check and the stopping signal need it
+const probeRe = (probe) => new RegExp(`(?<![A-Za-z0-9.])${probe.replace(".", "\\.")}(?![A-Za-z0-9.])`);
+export function findingTag(line) {
+  const m = line.match(RE.finding);
+  if (!m) return "untagged";
+  const start = m.index + m[0].length;
+  const t = line.slice(start, start + TAG_WINDOW + 9).match(RE.tagWord);
+  return t && t.index < TAG_WINDOW ? t[1].toLowerCase() : "untagged";
+}
+export const probeTokens = (text) => new Set([...text.matchAll(RE.probeToken)].map((x) => `${x[1]}.${x[2]}`));
 
 const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s)) && new Date(s).toISOString().slice(0, 10) === s;
 
 // ---------------------------------------------------------------- parsing
 
 export function parsePlan(text, file = "<memory>") {
-  const plan = { file, slug: basename(file, ".md"), fm: {}, kind: "feature", sections: {}, headings: [], items: [], baseline: [], amendments: [], transitions: [], evidence: [], children: [], assumptions: [], coverage: [], gate: null, parseErrors: [], limitWarnings: [], reviews: [], versions: [], audits: [], proposed: [], notes: [], packages: [], steps: [], hasWbs: false };
+  const plan = { file, slug: basename(file, ".md"), fm: {}, kind: "feature", sections: {}, headings: [], items: [], baseline: [], amendments: [], transitions: [], evidence: [], children: [], assumptions: [], coverage: [], gate: null, parseErrors: [], limitWarnings: [], limitProblems: [], reviews: [], versions: [], audits: [], proposed: [], notes: [], dryRuns: [], dryRunMalformed: [], packages: [], steps: [], hasWbs: false };
   if (Buffer.byteLength(text) > LIMITS.bytes) plan.limitWarnings.push("plan exceeds 1 MB");
-  // a line over the cap is reported and skipped — it is blanked so section boundaries and line numbers survive
-  const lines = text.split(/\r?\n/).map((l, k) => { if (l.length <= LIMITS.line) return l; plan.limitWarnings.push(`line ${k + 1} is over 10,000 characters — skipped`); return ""; });
+  // plan-limits D1: a line over the cap is a problem and is parsed AS WRITTEN. It used to be blanked with a warning,
+  // which silently dropped any D-item on it — the plan went on checking with one item fewer and nobody was told.
+  const lines = text.split(/\r?\n/);
+  lines.forEach((l, k) => { if (l.length > LIMITS.line) plan.limitProblems.push(`line ${k + 1} is over 10,000 characters`); });
   let i = 0;
   if (lines[0] !== "---") { plan.parseErrors.push("no frontmatter"); return plan; }
   for (i = 1; i < lines.length && lines[i] !== "---"; i++) {
@@ -215,7 +238,7 @@ export function parsePlan(text, file = "<memory>") {
   for (const l of sec("Baseline")) { const m = l.match(RE.item); if (m) plan.baseline.push(item(m)); else if (/^- /.test(l)) bad("Baseline", l); }
   for (const l of sec("Amendments")) {
     const m = l.match(RE.amendment);
-    if (m) plan.amendments.push({ id: m[1], n: Number(m[1].slice(1)), date: m[2], kind: m[3], ops: m[4].trim().split(/\s+/), layer: m[5].trim(), package: m[6] ?? null, why: m[7] });
+    if (m) plan.amendments.push({ id: m[1], n: Number(m[1].slice(1)), date: m[2], kind: m[3], ops: m[4].trim().split(/\s+/), layer: m[5].trim(), package: m[6] ?? null, reworks: m[7] ?? null, why: m[8] });
     else if (/^- /.test(l)) bad("Amendments", l);
   }
   // the work breakdown: parents carry a title alone, leaves carry `items:` and `steps:` (D14). The section's
@@ -236,7 +259,9 @@ export function parsePlan(text, file = "<memory>") {
     m = l.match(RE.version); if (m) { plan.versions.push({ seq: seq++, date: m[1], label: m[2], text: (m[3] ?? "").trim() }); continue; }
     m = l.match(RE.audit); if (m) { plan.audits.push({ seq: seq++, date: m[1], runId: m[2], verified: Number(m[3]), total: Number(m[4]), stale: Number(m[5]), unaccounted: Number(m[6]) }); continue; }
     if (RE.auditStart.test(l)) { plan.parseErrors.push(`audit line does not match the grammar: ${l.slice(0, 70)}`); continue; }
-    m = l.match(/^- (\d{4}-\d{2}-\d{2}) · note · (.+)$/); if (m) { plan.notes.push({ seq: seq++, date: m[1], text: m[2] }); continue; }
+    // calibration D27: a note may carry a bare carriage return or another control and is still a note; what this
+    // child echoes of it is cleaned (echoText) — `.` stops at the CR, which made it a grammar error printed raw
+    m = l.match(/^- (\d{4}-\d{2}-\d{2}) · note · ([^\n]+)$/); if (m) { const note = { seq: seq++, date: m[1], text: m[2] }; plan.notes.push(note); readDryRun(plan, note); continue; }
     if (/^- /.test(l) && !/^- \d{4}-\d{2}-\d{2} · (review skipped|renamed from|note) /.test(l)) bad("Log", l);
   }
   for (const l of sec("Children")) { const m = l.match(RE.child); if (m) plan.children.push({ slug: m[1], status: m[2], origin: m[3] ?? "baseline" }); else if (/^- /.test(l)) bad("Children", l); }
@@ -265,7 +290,7 @@ export function parseReviews(text) {
   let inDisp = false, block = null;
   for (const l of text.split(/\r?\n/)) {
     let m = l.match(RE.reviewHead);
-    if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), earlier: null, coverage: null }); inDisp = false; block = null; continue; }
+    if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), tags: new Map(), probes: new Map(), earlier: null, coverage: null, ...headFields(l) }); inDisp = false; block = null; continue; }
     if (!reviews.length) continue;
     const r = reviews.at(-1);
     if (/^### Dispositions/.test(l)) { inDisp = true; block = null; continue; }
@@ -276,18 +301,425 @@ export function parseReviews(text) {
     // a finding's block runs from its Fn line to the line before the next finding, coverage or VERDICT line: what
     // the reviewer wrote about it, which D7 reads for gating-probe tokens
     m = l.match(RE.finding);
-    if (m) { r.findings.add(m[1]); block = m[1]; r.blocks.set(block, l); continue; }
+    if (m) { r.findings.add(m[1]); block = m[1]; r.blocks.set(block, l); if (!r.tags.has(m[1])) r.tags.set(m[1], findingTag(l)); continue; }
     if (block) r.blocks.set(block, `${r.blocks.get(block)}\n${l}`);
   }
+  // review-loop D1: every finding's probes, read over its whole block
+  for (const r of reviews) for (const [f, text] of r.blocks) r.probes.set(f, probeTokens(text));
   return reviews;
 }
 
-export function loadPlans(dir) {
+// review-loop D3, D5, D8, D10: the optional fields a review heading carries after its reviewer, each read by its
+// keyword so free text between them (as every heading before this child has) still parses. Unknown fields are
+// ignored; a heading without the fields is unstamped and unscoped.
+export function headFields(line) {
+  const out = { stamp: null, files: null, prompt: null, scope: null };
+  const fields = line.split(" · ").slice(3).map((x) => x.trim());
+  let bytes = null, items = null;
+  fields.forEach((f, k) => {
+    let m = f.match(/^plan ([\d,]+) B$/); if (m) { bytes = Number(m[1].replace(/,/g, "")); return; }
+    m = f.match(/^(\d+) items$/); if (m) { items = Number(m[1]); return; }
+    m = f.match(/^files (\d+)$/); if (m) { const h = fields[k + 1]?.match(/^([0-9a-f]{12})$/); out.files = { k: Number(m[1]), hash: h ? h[1] : null }; return; }
+    m = f.match(/^prompt ([0-9a-f]{12})$/); if (m) { out.prompt = m[1]; return; }
+    m = f.match(/^scope (A\d+(?:,\s?A\d+)*)$/); if (m) out.scope = m[1].split(",").map((x) => x.trim());
+  });
+  if (bytes !== null && items !== null) out.stamp = { bytes, items };
+  return out;
+}
+
+// review-loop: every problem, warning, information and refusal text this child adds; placeholders are <name>,
+// filled by fmtV. plan-template.md › "Review loop — cap, growth, signal, scope" carries the same texts, and
+// selftest case template-sync-review compares the two.
+export const MESSAGES_REVIEW = {
+  roundCap: 'Review <n> is round <r> of a run with no READY — log "note · round cap · after Review <k> · owner: <decision>" before it',
+  growth: "review growth: Review <a> <x> KB · <i> items → Review <b> <y> KB · <j> items, +<p> % in this run",
+  signalMet: "review loop: <k> rounds since <since> · stopping signal met at Review <n>",
+  signalNot: "review loop: <k> rounds since <since> · stopping signal not met at Review <n> — <reason>",
+  reasonUntagged: "F<f> is untagged",
+  reasonNoProbe: "F<f> is blocking and quotes no probe",
+  reasonGating: "F<f> quotes gating probe <p>",
+  reasonReraise: "F<f> re-raises <p> from Review <m>",
+  scopeUnknown: "Review <n> is scoped <id>, which is not an amendment of this plan",
+  scopeOutside: "Review <n> is scoped <ids>; F<f> is blocking but quotes only <probes>, outside the scope — advisory by the scope rule: disposition it advisory, or rerun unscoped",
+  promptRoundCap: 'review-prompt: Review <n> would be round <r> of a run with no READY — log "note · round cap · after Review <k> · owner: <decision>" first, or build with --reviewer human',
+  promptUsage: "usage: dod-index.mjs --review-prompt <slug> [--reviewer codex|subagent|human] [--scope A<n>,…] [--dir <store>]",
+  promptNoPlan: "review-prompt: no plan <slug> in the store",
+  promptProblems: "review-prompt: <slug> has <k> check problem(s) — fix them first",
+  promptRedaction: "review-prompt: the redacted plan <what> — not written",
+  promptScopeUnknown: "review-prompt: <id> is not an amendment of <slug>",
+  promptCannotWrite: "review-prompt: cannot write <path> (<code>)",
+  promptReplaced: "review-prompt: <name> was replaced by another run — build again",
+  noCodeFiles: "no code files: <reason>",
+  citesNone: "the plan cites none",
+  noRepo: "not a git repository",
+  gitTimeout: "git timed out after 10 s",
+  gitExit: "git exited <code>",
+  more: "… and <n> more: <reason>",
+  notFound: "not found",
+  link: "a link",
+  outside: "outside the repository",
+  untracked: "untracked",
+  ignored: "ignored",
+  inStore: "in the plan store",
+  refusedName: "refused name",
+  binary: "binary",
+  notUtf8: "not UTF-8",
+  tokenShaped: "token-shaped content at line <n>",
+  overBudget: "over budget (<bytes> B, <left> B left)",
+  overCap: "over the 200-citation cap",
+};
+export const fmtV = (key, vals = {}) => MESSAGES_REVIEW[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+
+// calib:begin — calibration (dod-v0-2 child): dry-run evidence before approval. Every text it prints is a value of
+// MESSAGES_CALIBRATION, emitted only through fmtC inside this region; every rule condition carries a
+// marker — the comment `calib-mutant` with the rule's name, then the condition in parentheses, then `calib-end` — so docs/dod/calibration.mutants.sh can turn each one off and
+// prove its selftest case fails (D23). plan-template.md › Calibration carries the same texts.
+export const MESSAGES_CALIBRATION = {
+  dryRunMalformed: "dry-run note does not match the grammar: <text>",
+  dryRunUnknown: "dry-run note names <id>, which is not an item of this plan",
+  dryRunType: "<id>'s dry-run note says <type>, but the item's evidence is <itemType>",
+  dryRunNaShort: "<id>'s dry-run n/a reason is shorter than 12 characters",
+  dryRunMissing: "D<n> has no dry-run note before approval — run its command on the draft and record what it printed, or record why it cannot run yet",
+  dryRunPrivate: "D<n>'s dry-run note carries a home path or an e-mail — write <home> or <tmp> instead",
+  depthMissing: "probe <p> has a miss history (<k> of <n> done plans) and none of its items <ids> has an observed dry run",
+  depthMissingProfile: "probe <p> is a project probe of profile.md and none of its items <ids> has an observed dry run",
+  historyLine: "coverage <coverage> · miss history: <list>",
+  historyNone: "coverage <coverage> · miss history: none yet (<n> done plans)",
+  historyPartial: " · incomplete: <k> file(s) could not be read, see the warnings",
+  profileUnreadable: "miss history: profile.md unreadable (<code>) — computed from the store only",
+  profileRow: "miss history: profile.md row is not `- <probe> · …` with a rubric-2 probe — skipped: <text>",
+  planSkipped: "miss history: <name> does not parse — skipped",
+  storeChanged: "miss history: the store changed during this run — rerun for a consistent result",
+  reworkUnknown: "<An> reworks <Ak>, which is not an earlier amendment of this plan",
+  reworkPart: " · rework <r> of <m>",
+  indexHistory: "Miss history — done plans: <list>",
+  indexRework: "Rework — done plans: <r> of <m> misses corrected an earlier amendment.",
+  indexNone: "<label> — done plans: none yet.",
+  findingsLine: "review findings on miss-history probes: <k> of <n>",
+  hostSummary: "host: <n> rows · measured <date>",
+  hostNotSet: "host: not set",
+  hostProblem: "✗ host: <reason>",
+  hostShape: "row is not `- <name> · <value> · measured <YYYY-MM-DD>`: <text>",
+  hostDate: "<name> is measured \"<date>\", which is not a valid YYYY-MM-DD",
+  hostName: "row name is empty or longer than 40 characters: <text>",
+  hostEmpty: "<name> has an empty value",
+  hostDuplicate: "<name> appears more than once (names compare case-insensitively)",
+  hostFault: "profile.md ## Host: <reason> — skipped",
+  twinsMissing: "<An> names no twins and no failing input — add \"twins: <other places>\" or \"fails when: <input>\"",
+};
+export const fmtC = (key, vals = {}) => MESSAGES_CALIBRATION[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+// the rules bite plans baselined on or after the day the checker ships (A4: the owner moved it from 2026-09-27),
+// and every plan not yet baselined; an earlier plan's notes are read as plain notes, as before
+export const CALIBRATION_FROM = "2026-10-02";
+export const HISTORY_MIN_PLANS = 2;
+// D1: `dry-run · D<n> · <test|cmd>: <code span> → <printed>` or `dry-run · D<n> · n/a · <reason>`. The command is
+// one Markdown code span — a command holding a backtick uses a longer fence — so an arrow inside it never splits it.
+const DRY_RE = /^dry-run · (D\d+) · (?:(test|cmd): (`+)(.+?)\3 → (.+)|n\/a · (.+))$/;
+function readDryRun(plan, note) {
+  if (!note.text.startsWith("dry-run ·")) return;
+  const m = note.text.match(DRY_RE);
+  if (m) plan.dryRuns.push({ seq: note.seq, date: note.date, id: m[1], type: m[2] ?? null, command: m[4] ?? null, printed: m[5] ?? null, na: m[6] ?? null, text: note.text });
+  else plan.dryRunMalformed.push({ seq: note.seq, date: note.date, id: note.text.match(/^dry-run · (D\d+)\b/)?.[1] ?? null, text: note.text });
+}
+// D27: echoed text loses C0 and C1 controls (ANSI escapes included) and is cut at 120 characters with "…"
+const ECHO_MAX = 120;
+export function echoText(s) {
+  const clean = /* calib-mutant:echo-strip */(true)/* calib-end */ ? String(s).replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "") : String(s);
+  const cps = Array.from(clean);
+  return /* calib-mutant:echo-cut */(cps.length > ECHO_MAX)/* calib-end */ ? cps.slice(0, ECHO_MAX).join("") + "…" : clean;
+}
+// D24: a home path (either slash, any case) or an e-mail, the shapes scripts/checks/release-check.mjs scans for
+const PRIVATE_RE = [/(?:\b[A-Za-z]:[\\/]+users[\\/]+|\/home\/|\/users\/)(?!<)[A-Za-z0-9_.-]+/i, /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/];
+export function calibChecks(plan, ctx) {
+  const problems = [], warnings = [];
+  const fm = plan.fm;
+  const base = fm.baselined ?? "none";
+  const on = /* calib-mutant:calib-from */(base === "none" || !validDate(base) || base >= CALIBRATION_FROM)/* calib-end */;
+  const byId = new Map(plan.items.map((x) => [x.id, x]));
+  if (on) {
+    for (const n of plan.dryRunMalformed) if (/* calib-mutant:dry-run-malformed */(true)/* calib-end */) problems.push(fmtC("dryRunMalformed", { text: echoText(n.text) }));
+    for (const d of plan.dryRuns) {
+      const it = byId.get(d.id);
+      if (/* calib-mutant:dry-run-unknown */(!it)/* calib-end */) problems.push(fmtC("dryRunUnknown", { id: d.id }));
+      if (!it) continue; // a separate guard, so the mutant above goes silent instead of crashing the selftest
+      if (/* calib-mutant:dry-run-type */(d.type !== null && d.type !== it.type)/* calib-end */) problems.push(fmtC("dryRunType", { id: d.id, type: d.type, itemType: it.type }));
+      if (/* calib-mutant:dry-run-na-short */(d.na !== null && d.na.trim().length < 12)/* calib-end */) problems.push(fmtC("dryRunNaShort", { id: d.id }));
+    }
+  }
+  // D2: every test and cmd item of the Baseline has a note before the ready line, dated on or before `baselined`;
+  // a backlog plan's pass before ready stands in for it, as it pre-verifies the item
+  const readySeq = ctx.readySeq;
+  if (/* calib-mutant:dry-run-at-ready */(readySeq !== undefined && validDate(base) && base >= CALIBRATION_FROM)/* calib-end */) {
+    const early = new Set(plan.dryRuns.filter((d) => d.seq < readySeq && d.date <= base).map((d) => d.id));
+    if (plan.kind === "backlog") for (const e of plan.evidence) if (e.result === "pass" && e.seq < readySeq) early.add(e.id);
+    for (const b of plan.baseline) if ((b.type === "test" || b.type === "cmd") && /* calib-mutant:dry-run-missing */(!early.has(b.id))/* calib-end */) problems.push(fmtC("dryRunMissing", { n: b.id.slice(1) }));
+    // D4: a miss-history probe the Coverage map answers with items needs one of them observed — a dry run that is
+    // not n/a, in the same window as D2; a probe answered by prose is not asked
+    const observed = new Set(plan.dryRuns.filter((d) => d.na === null && d.seq < readySeq && d.date <= base).map((d) => d.id));
+    const map = probeMap(plan);
+    for (const [p, h] of ctx.history ?? []) {
+      const m = map.get(p);
+      if (!m || m.prose || !m.items.length) continue;
+      const vals = { p, k: h.plans, n: h.done, ids: m.items.join(" ") };
+      if (/* calib-mutant:depth */(!m.items.some((id) => observed.has(id)))/* calib-end */) problems.push(fmtC(h.plans >= HISTORY_MIN_PLANS ? "depthMissing" : "depthMissingProfile", vals));
+    }
+  }
+  // D10: of every finding in the plan's reviews, those quoting a miss-history probe; nothing when there is none
+  const info = [];
+  const findings = (plan.reviews ?? []).flatMap((r) => [...r.findings].map((f) => r.probes.get(f) ?? new Set()));
+  const onHistory = findings.filter((ps) => [...ps].some((p) => ctx.history?.has(p))).length;
+  if (/* calib-mutant:findings-any */(findings.length > 0)/* calib-end */) info.push(fmtC("findingsLine", { k: onHistory, n: findings.length }));
+  // D6: `reworks: A<k>` names an earlier amendment of this plan
+  for (const a of plan.amendments) {
+    if (!a.reworks) continue;
+    const target = plan.amendments.find((x) => x.id === a.reworks);
+    if (/* calib-mutant:rework-earlier */(!target || target.n >= a.n)/* calib-end */) problems.push(fmtC("reworkUnknown", { An: a.id, Ak: a.reworks }));
+  }
+  // D9: a miss recorded from CALIBRATION_FROM names its twins or its failing input
+  for (const a of plan.amendments) {
+    if (!(/* calib-mutant:twins-scope */(validDate(a.date) && a.date >= CALIBRATION_FROM && (a.kind === "discovered" || a.kind === "corrected"))/* calib-end */)) continue;
+    if (/* calib-mutant:twins-text */(!/twins:|fails when:/.test(a.why))/* calib-end */) warnings.push(fmtC("twinsMissing", { An: a.id }));
+  }
+  ctx.info = info;
+  // D24: a note that prints a home path or an e-mail is a warning in draft and a problem once the plan was ready
+  const sink = /* calib-mutant:dry-run-private-ready */(ctx.reachedReady)/* calib-end */ ? problems : warnings;
+  for (const n of [...plan.dryRuns, ...plan.dryRunMalformed]) if (/* calib-mutant:dry-run-private */(PRIVATE_RE.some((re) => re.test(n.text)))/* calib-end */) sink.push(fmtC("dryRunPrivate", { n: (n.id ?? "D?").slice(1) }));
+  return { problems, warnings };
+}
+// D6: of the discovered and corrected amendments (m), those that rework an earlier one (r)
+export function reworkCount(plan) {
+  const misses = plan.amendments.filter((a) => a.kind === "discovered" || a.kind === "corrected");
+  return { rework: misses.filter((a) => /* calib-mutant:rework-count */(a.reworks !== null)/* calib-end */).length, reworkOf: misses.length };
+}
+export const reworkPart = (r) => (/* calib-mutant:rework-part */(true)/* calib-end */ ? fmtC("reworkPart", { r: r.rework, m: r.reworkOf }) : "");
+// D4: the rubric-2 probe map of the Coverage table — probe → the items it names, or prose
+function probeMap(plan) {
+  const out = new Map();
+  for (const r of plan.coverage) {
+    if (r.status !== "Considered") continue;
+    const segs = r.pointer.split("›");
+    const body = segs.length > 1 ? segs[segs.length - 1] : "";
+    for (const part of body.split(";").map((x) => x.trim()).filter(Boolean)) {
+      const pm = part.match(/^(\d+\.\d+)\s+(.+)$/);
+      if (!pm) continue;
+      const prose = /^prose:/.test(pm[2]);
+      out.set(pm[1], { prose, items: prose ? [] : [...pm[2].matchAll(/\bD\d+\b/g)].map((x) => x[0]) });
+    }
+  }
+  return out;
+}
+// D3: the probe ids an amendment's `layer:` names — `layer: 7` is a layer, not a probe, and never counts
+const layerProbes = (layer) => String(layer).split(/[\s,]+/).filter((x) => /^\d{1,2}\.\d{1,2}$/.test(x) && probeIds(2, Number(x.split(".")[0])).includes(x));
+// D3, D26: the rows of `## Project probes` in profile.md, `- <n>.<m> · <text>`; an indented line continues a row
+export function parseProjectProbes(text) {
+  const probes = [], malformed = [];
+  let inSection = false;
+  for (const l of String(text).split(/\r?\n/)) {
+    if (l.startsWith("## ")) { inSection = /^## Project probes\s*$/.test(l); continue; }
+    if (!inSection || !l.startsWith("- ")) continue;
+    const m = l.match(/^- (\d{1,2}\.\d{1,2}) · \S/);
+    const ok = Boolean(m) && probeIds(2, Number(m[1].split(".")[0])).includes(m[1]);
+    if (/* calib-mutant:profile-row */(!ok)/* calib-end */) malformed.push(l); else if (m) probes.push(m[1]);
+  }
+  return { probes, malformed };
+}
+// D3: probe → { plans: done plans whose discovered or corrected amendments name it, done: done plans read, profile }.
+// A probe counts once per plan; it is history from HISTORY_MIN_PLANS plans, or from a profile row. A done plan that
+// does not parse is left out (D26 warns about it).
+export function missHistory(plans, profileText = "") {
+  const done = plans.filter((p) => /* calib-mutant:history-done */(p.fm.status === "done")/* calib-end */ && !p.parseErrors.length);
+  const out = new Map();
+  const entry = (x) => { if (!out.has(x)) out.set(x, { plans: 0, done: done.length, profile: false }); return out.get(x); };
+  for (const p of done) {
+    const seen = new Set();
+    for (const a of p.amendments) if (/* calib-mutant:history-kind */(a.kind === "discovered" || a.kind === "corrected")/* calib-end */) for (const x of layerProbes(a.layer)) seen.add(x);
+    for (const x of seen) entry(x).plans++;
+  }
+  for (const [x, h] of out) if (/* calib-mutant:history-min */(h.plans < HISTORY_MIN_PLANS)/* calib-end */) out.delete(x);
+  for (const x of parseProjectProbes(profileText).probes) entry(x).profile = true;
+  return out;
+}
+// D5: most-missed first, then probe order; probes from the profile alone last
+const probeKey = (p) => p.split(".").map(Number);
+export function historyOrder(history) {
+  const cmp = (a, b) => { const [x, y] = [probeKey(a[0]), probeKey(b[0])]; return x[0] - y[0] || x[1] - y[1]; };
+  const all = [...history];
+  const seen = all.filter(([, h]) => h.plans >= HISTORY_MIN_PLANS).sort((a, b) => b[1].plans - a[1].plans || cmp(a, b));
+  return [...seen, ...all.filter(([, h]) => h.plans < HISTORY_MIN_PLANS).sort(cmp)];
+}
+
+// D26, D29: one store read — profile.md, then every plan and reviews file — each file hashed as it is read. After the
+// last read every file is read and hashed again; when any changed the store is read once more, and when that read
+// changed too the run completes with D29's warning. A fault in one file is a warning and the rest is still read.
+// The seam runs between the reads and the verification, where a concurrent writer would land (calib.snapshot).
+export const calibSeams = { DOD_TEST_BETWEEN_READS: null, readFileSync: (p) => readFileSync(p) };
+const STORE_META = new WeakMap();
+function readStoreOnce(dir) {
+  const hashes = new Map(), faults = [];
+  const read = (p) => { const b = calibSeams.readFileSync(p); hashes.set(p, sha256(b)); return b; };
+  let profile = "";
+  const pf = join(dir, "profile.md");
+  if (existsSync(pf)) {
+    try { if (statSync(pf).size > PROFILE_CAP) throw Object.assign(new Error("over 1 MB"), { code: "over 1 MB" }); profile = new TextDecoder("utf-8", { fatal: true }).decode(read(pf)); } catch (e) {
+      const code = e.code === "ERR_ENCODING_INVALID_ENCODED_DATA" ? "not UTF-8" : e.code ?? "error";
+      if (/* calib-mutant:profile-fault */(true)/* calib-end */) faults.push(fmtC("profileUnreadable", { code }));
+    }
+  }
+  const plans = loadPlans(dir, { read, onReviewsFault: (p) => { if (/* calib-mutant:reviews-fault */(true)/* calib-end */) faults.push(fmtC("planSkipped", { name: `${p.slug}.reviews.md` })); } });
+  for (const row of parseProjectProbes(profile).malformed) if (/* calib-mutant:profile-row-warn */(true)/* calib-end */) faults.push(fmtC("profileRow", { text: echoText(row) }));
+  for (const reason of parseHost(profile).problems) if (/* calib-mutant:host-fault */(true)/* calib-end */) faults.push(fmtC("hostFault", { reason }));
+  for (const p of plans) if (/* calib-mutant:plan-skipped */(p.fm.status === "done" && p.parseErrors.length > 0)/* calib-end */) faults.push(fmtC("planSkipped", { name: p.slug }));
+  calibSeams.DOD_TEST_BETWEEN_READS?.(dir);
+  return { plans, profile, hashes, faults };
+}
+export function loadStore(dir) {
+  const changed = (x) => [...x.hashes].some(([p, h]) => { try { return sha256(calibSeams.readFileSync(p)) !== h; } catch { return true; } });
+  let s = readStoreOnce(dir), reads = 1;
+  if (/* calib-mutant:store-changed */(changed(s))/* calib-end */) {
+    s = readStoreOnce(dir); reads = 2;
+    if (/* calib-mutant:store-changed-twice */(changed(s))/* calib-end */) s.faults.push(fmtC("storeChanged"));
+  }
+  STORE_META.set(s.plans, { history: missHistory(s.plans, s.profile), faults: s.faults, reads });
+  return s.plans;
+}
+// the history of a loaded plan list: loadStore's, with the profile; any other list computes it once, without one
+export function storeMeta(all) {
+  if (!STORE_META.has(all)) STORE_META.set(all, { history: missHistory(all, ""), faults: [], reads: 0 });
+  return STORE_META.get(all);
+}
+// D8: the index's two lines — the history in probe order, and rework over done plans; "none yet" with no done plan
+export function indexLines(plans, reports) {
+  const { history } = storeMeta(plans);
+  const done = plans.filter((p) => p.fm.status === "done" && !p.parseErrors.length);
+  const order = [...history].sort((a, b) => { const [x, y] = [probeKey(a[0]), probeKey(b[0])]; return x[0] - y[0] || x[1] - y[1]; });
+  const list = order.map(([p, h]) => (h.plans >= HISTORY_MIN_PLANS ? `${p} (${h.plans} of ${h.done})` : `${p} (profile)`)).join(" · ");
+  const rw = done.map((p) => reports.get(p.slug)).reduce((s, r) => ({ r: s.r + r.rework, m: s.m + r.reworkOf }), { r: 0, m: 0 });
+  return [
+    /* calib-mutant:index-history-none */(!list)/* calib-end */ ? fmtC("indexNone", { label: "Miss history" }) : fmtC("indexHistory", { list }),
+    /* calib-mutant:index-none */(done.length === 0)/* calib-end */ ? fmtC("indexNone", { label: "Rework" }) : fmtC("indexRework", { r: rw.r, m: rw.m }),
+  ];
+}
+// D11: `## Host` rows, `- <name> · <value> · measured <YYYY-MM-DD>` — exactly three fields, so no field holds ` · `
+export function parseHost(text) {
+  const rows = [], problems = [], seen = new Set();
+  let inSection = false;
+  for (const l of String(text).split(/\r?\n/)) {
+    if (l.startsWith("## ")) { inSection = /^## Host\s*$/.test(l); continue; }
+    if (!inSection || !l.startsWith("- ")) continue;
+    const f = l.slice(2).split(" · ");
+    const m = f.length === 3 ? f[2].match(/^measured (\S+)$/) : null;
+    if (/* calib-mutant:host-shape */(!m)/* calib-end */) { problems.push(fmtC("hostShape", { text: echoText(l) })); continue; }
+    if (!m) continue;
+    const [name, value] = [f[0].trim(), f[1].trim()];
+    if (/* calib-mutant:host-name */(name.length < 1 || name.length > 40)/* calib-end */) { problems.push(fmtC("hostName", { text: echoText(l) })); continue; }
+    if (/* calib-mutant:host-date */(!validDate(m[1]))/* calib-end */) { problems.push(fmtC("hostDate", { name: echoText(name), date: echoText(m[1]) })); continue; }
+    if (/* calib-mutant:host-empty */(!value)/* calib-end */) { problems.push(fmtC("hostEmpty", { name: echoText(name) })); continue; }
+    if (/* calib-mutant:host-duplicate */(seen.has(name.toLowerCase()))/* calib-end */) { problems.push(fmtC("hostDuplicate", { name: echoText(name) })); continue; }
+    seen.add(name.toLowerCase());
+    rows.push({ name, value, measured: m[1] });
+  }
+  return { rows, problems };
+}
+// D11: what --profile prints for the host, and whether it failed
+export function hostReport(text) {
+  const { rows, problems } = parseHost(text);
+  const latest = rows.map((r) => r.measured).sort().at(-1);
+  const head = /* calib-mutant:host-set */(rows.length > 0)/* calib-end */ ? fmtC("hostSummary", { n: rows.length, date: latest }) : fmtC("hostNotSet");
+  const lines = [head];
+  for (const reason of problems) if (/* calib-mutant:host-problems */(true)/* calib-end */) lines.push(fmtC("hostProblem", { reason }));
+  return { lines, failed: problems.length > 0 };
+}
+// D5: the line --check prints after its numbers line
+export function historyLine(plan, all) {
+  const { history, faults } = storeMeta(all);
+  const n = all.filter((p) => p.fm.status === "done" && !p.parseErrors.length).length;
+  const list = historyOrder(history).map(([p, h]) => (h.plans >= HISTORY_MIN_PLANS ? `${p} in ${h.plans} of ${h.done} done plans` : `${p} profile`));
+  const coverage = plan.fm.coverage_author ?? "pending";
+  const line = /* calib-mutant:history-empty */(list.length > 0)/* calib-end */ ? fmtC("historyLine", { coverage, list: list.join(" · ") }) : fmtC("historyNone", { coverage, n });
+  return line + (/* calib-mutant:history-partial */(faults.length > 0)/* calib-end */ ? fmtC("historyPartial", { k: faults.length }) : "");
+}
+// calib:end
+
+// review-loop D2: the round-cap rule. A run is the reviews after the last READY (all of them when there is none);
+// a codex or subagent review at position 4 or later of its run needs the owner's note, keyed to review numbers so
+// it survives a change of author (2.3). A human review is the owner's own act and never needs one.
+const ROUND_CAP = 3;
+// review-loop A2: a run held before the rule existed breaches it on record only — a warning at every status
+const ROUND_CAP_FROM = "2026-09-27";
+const CAP_NOTE_RE = /^round cap · after Review (\d+) · owner: (\S.*?)(?: · through Review (\d+))?\s*$/;
+export function reviewRun(reviews) {
+  const k = reviews.map((r) => r.verdict).lastIndexOf("READY");
+  return { run: reviews.slice(k + 1), afterReady: k >= 0 };
+}
+export function capCovered(plan, n) {
+  return plan.notes.some((x) => {
+    const m = x.text.match(CAP_NOTE_RE);
+    if (!m) return false;
+    const k = Number(m[1]), through = m[3] ? Number(m[3]) : null;
+    const after = plan.reviews.find((r) => r.n === k);
+    if (!after || x.date < after.date) return false;
+    return k === n - 1 || (through !== null && k < n && through >= n);
+  });
+}
+// the reviews that break the cap without a covering note — each review's round counts from the READY before it,
+// so a breach stays on record after a later READY closes its run
+export function capBreaches(plan) {
+  const out = [];
+  let round = 0;
+  for (const r of plan.reviews) {
+    round++;
+    if (round > ROUND_CAP && r.reviewer !== "human" && !capCovered(plan, r.n)) out.push({ r, round });
+    if (r.verdict === "READY") round = 0;
+  }
+  return out;
+}
+// review-loop D4: the stopping signal over the last two reviews of a run ending in REVISE — information only
+export function stoppingSignal(plan, gating) {
+  const { run, afterReady } = reviewRun(plan.reviews);
+  const last = run.at(-1);
+  if (run.length < 2 || last.verdict !== "REVISE") return null;
+  const prev = plan.reviews.find((r) => r.n === last.n - 1);
+  const prevBlocking = new Set();
+  if (prev) for (const f of prev.findings) if (prev.tags.get(f) === "blocking") for (const p of prev.probes.get(f) ?? []) prevBlocking.add(p);
+  let reason = null;
+  for (const f of last.blocks.keys()) {
+    const tag = last.tags.get(f), probes = [...(last.probes.get(f) ?? [])];
+    if (tag === "untagged") reason = fmtV("reasonUntagged", { f });
+    else if (tag === "blocking" && !probes.length) reason = fmtV("reasonNoProbe", { f });
+    else if (tag === "blocking") { const g = probes.find((p) => gating.includes(p)); if (g) reason = fmtV("reasonGating", { f, p: g }); else { const re = probes.find((p) => prevBlocking.has(p)); if (re) reason = fmtV("reasonReraise", { f, p: re, m: last.n - 1 }); } }
+    if (reason) break;
+  }
+  const since = afterReady ? "the last READY" : "the first review";
+  return reason ? fmtV("signalNot", { k: run.length, since, n: last.n, reason }) : fmtV("signalMet", { k: run.length, since, n: last.n });
+}
+// review-loop D3: +50 % bytes between the first and the latest stamped review of the run
+const GROWTH = 0.5;
+export function growthWarning(plan) {
+  const stamped = reviewRun(plan.reviews).run.filter((r) => r.stamp);
+  if (stamped.length < 2) return null;
+  const a = stamped[0], b = stamped.at(-1);
+  if (!(a.stamp.bytes > 0) || b.stamp.bytes <= a.stamp.bytes * (1 + GROWTH)) return null;
+  const kb = (x) => (x / 1024).toFixed(1);
+  return fmtV("growth", { a: a.n, x: kb(a.stamp.bytes), i: a.stamp.items, b: b.n, y: kb(b.stamp.bytes), j: b.stamp.items, p: (Math.round((b.stamp.bytes / a.stamp.bytes - 1) * 1000) / 10).toFixed(1) });
+}
+// review-loop D10: the probes a set of amendments scopes — `layer: 14.1` is that probe, `layer: 14` the whole layer
+export function scopeProbes(plan, ids) {
+  const r = rubricOf(plan), out = new Set();
+  for (const id of ids) {
+    const a = plan.amendments.find((x) => x.id === id);
+    if (!a) continue;
+    if (/^\d{1,2}\.\d$/.test(a.layer)) out.add(a.layer);
+    else if (/^\d{1,2}$/.test(a.layer) && Number(a.layer) >= 1 && Number(a.layer) <= 15) for (const p of probeIds(r, Number(a.layer))) out.add(p);
+  }
+  return out;
+}
+
+export function loadPlans(dir, { read = (p) => readFileSync(p), onReviewsFault = null } = {}) {
   if (!existsSync(dir)) return [];
   const plans = readdirSync(dir)
     .filter((f) => f.endsWith(".md") && f !== "README.md" && f !== "profile.md" && !f.endsWith(".reviews.md"))
     .sort()
-    .map((f) => [f, readFileSync(join(dir, f), "utf8")])
+    .map((f) => [f, read(join(dir, f)).toString("utf8")])
     // The "every node" discriminator (wbs-view D34): a plan is a `.md` that OPENS with a YAML front-matter
     // block. Filtering by file name alone is not enough, because `--export md` writes `wbs.md` into this same
     // store by default — and that export was then parsed as a plan and every line of it reported as a grammar
@@ -297,7 +729,9 @@ export function loadPlans(dir) {
     .map(([f, text]) => parsePlan(text, join(dir, f)));
   for (const p of plans) {
     const rf = join(dir, `${p.slug}.reviews.md`);
-    p.reviews = existsSync(rf) ? parseReviews(readFileSync(rf, "utf8")) : [];
+    // decoded non-fatally: a stray cp1252 byte reads as U+FFFD and the file still parses (review-loop D1)
+    // calibration D26: a reviews file that cannot be read is skipped with a warning when the caller asks for one
+    try { p.reviews = existsSync(rf) ? parseReviews(new TextDecoder("utf-8").decode(read(rf))) : []; } catch (e) { if (!onReviewsFault) throw e; p.reviews = []; onReviewsFault(p, e); }
   }
   return plans;
 }
@@ -394,7 +828,16 @@ export function packageCheck(plan) {
     // printed a row for one that does not exist — the same fault D15's fourth problem prevents in the other
     // direction — and the growth is dropped rather than misattributed, so no phantom row can reach the report.
     if (!leaves.some((p) => p.id === a.package)) { problems.push(fmtW("unknownPackage", { An: a.id, Wid: a.package })); continue; }
-    grewMap.set(a.package, (grewMap.get(a.package) ?? 0) + adds.length);
+    // plan-limits D5: the leaf resolving is not enough — it has to be the leaf that lists the item, or the tree's
+    // `grew` column credits a package that did not grow (wbs-view F4). Only the owned adds count.
+    let owned = 0;
+    for (const op of adds) {
+      const Dn = op.slice(1);
+      const o = owners.get(Dn) ?? [];
+      if (o.includes(a.package)) { owned++; continue; }
+      problems.push(o.length ? fmtW("growthElsewhere", { An: a.id, Wid: a.package, Dn, Wother: o.join(", ") }) : fmtW("growthUnowned", { An: a.id, Wid: a.package, Dn }));
+    }
+    if (owned) grewMap.set(a.package, (grewMap.get(a.package) ?? 0) + owned);
   }
   const grew = [...grewMap].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([id, n]) => ({ id, n }));
   return { problems, warnings, grew };
@@ -422,12 +865,14 @@ export function convergedOnRecord(plan) {
 
 export function checkPlan(plan, all = [plan]) {
   const problems = [];
+  const info = [];
   const warnings = [...plan.limitWarnings];
   const fm = plan.fm;
   const status = fm.status;
   const past = PAST_DRAFT.includes(status);
   const store = storeInfo(all);
   if (plan.parseErrors.length) problems.push(...plan.parseErrors);
+  problems.push(...plan.limitProblems);
   if (fm.kind !== undefined && !KINDS.includes(fm.kind)) problems.push(`kind "${fm.kind}" must be feature, product or backlog`);
   if (plan.items.length > LIMITS.items) warnings.push("plan exceeds 500 items");
   // version lines: unique labels, non-decreasing dates, text required
@@ -551,7 +996,7 @@ export function checkPlan(plan, all = [plan]) {
   const expected = new Set(everSeen);
   const changedAt = new Map(); // id → date of last ~ or +
   let discoveredOps = 0, lastDate = "", lastN = 0;
-  let lastMaterialReviewTrigger = null; // date of last amendment that requires re-review (gating probe or removal)
+  const reviewTriggers = []; // review-loop D10: every amendment that requires re-review (gating probe or removal)
   for (const a of plan.amendments) {
     if (a.n !== lastN + 1) problems.push(`${a.id}: amendment ids must be sequential (expected A${lastN + 1})`);
     lastN = a.n;
@@ -574,7 +1019,7 @@ export function checkPlan(plan, all = [plan]) {
     if (a.kind === "emergent" && !/finding:\s*\S[\s\S]{11,}/.test(a.why)) problems.push(fmtA("emergentFinding", { An: a.id }));
     // D23: a scope change the user asked for should show up as a plan version
     if (rubric === 2 && a.kind === "requested" && !plan.versions.some((v) => v.date >= a.date)) warnings.push(fmtA("unversionedRequest", { An: a.id, date: a.date }));
-    if (gating.includes(a.layer) || removal) lastMaterialReviewTrigger = a;
+    if (gating.includes(a.layer) || removal) reviewTriggers.push({ a, removal });
   }
   // plan-accuracy D6: an item named by ACCRETION or more amendments, counting each amendment once
   for (const it of plan.items) {
@@ -680,7 +1125,7 @@ export function checkPlan(plan, all = [plan]) {
     if (lastReview.earlier !== "EARLIER: all resolved") problems.push(fmtA("convergedEarlier", { v, n }));
     for (const f of lastReview.rejected) problems.push(fmtA("convergedRejected", { v, n, f }));
     for (const [f, text] of lastReview.blocks) {
-      const hit = gating.find((probe) => new RegExp(`(?<![\\w.])${probe.replace(".", "\\.")}(?![\\w.])`).test(text));
+      const hit = gating.find((probe) => probeRe(probe).test(text));
       if (hit) problems.push(fmtA("convergedGating", { v, n, f, p: hit }));
     }
     const bounded = validDate(fm.baselined) && lastReview.date <= fm.baselined; // this review stands for approve
@@ -706,11 +1151,33 @@ export function checkPlan(plan, all = [plan]) {
     }
   }
   if (status === "in-progress" && review === "pending") warnings.push("review is pending (re-opened by an amendment?) — approve before close");
-  if (lastMaterialReviewTrigger && !approvals.some((r) => r.date >= lastMaterialReviewTrigger.date)) {
-    const a = lastMaterialReviewTrigger;
+  // review-loop D10: once any review carries a scope, each trigger is owed its own READY on or after it, and a READY
+  // clears the amendments its scope names or, unscoped, all of them; with no scoped review (every plan reviewed before
+  // this child) only the last trigger is owed one, exactly as before, so no existing plan gains a problem (D13)
+  const scoped = plan.reviews.some((r) => r.scope);
+  for (const { a } of scoped ? reviewTriggers : reviewTriggers.slice(-1)) {
+    if (approvals.some((r) => r.date >= a.date && (!r.scope || r.scope.includes(a.id)))) continue;
     if (status === "done") problems.push(`${a.id} (${gating.includes(a.layer) ? `gating probe ${a.layer}` : "removes a baseline item"}) has no READY review dated on/after it`);
     else if (review !== "pending") problems.push(`${a.id} (${gating.includes(a.layer) ? `gating probe ${a.layer}` : "removes a baseline item"}) requires review: pending until re-approved`);
   }
+  // review-loop D10: a scope names amendments of this plan; a blocking finding quoting only probes outside it is flagged
+  const amendIds = new Set(plan.amendments.map((a) => a.id));
+  for (const r of plan.reviews) {
+    if (!r.scope) continue;
+    for (const id of r.scope) if (!amendIds.has(id)) problems.push(fmtV("scopeUnknown", { n: r.n, id }));
+    const inScope = scopeProbes(plan, r.scope);
+    for (const f of r.blocks.keys()) {
+      const ps = [...(r.probes.get(f) ?? [])];
+      if (r.tags.get(f) === "blocking" && ps.length && ps.every((p) => !inScope.has(p))) warnings.push(fmtV("scopeOutside", { n: r.n, ids: r.scope.join(","), f, probes: ps.join(", ") }));
+    }
+  }
+  // review-loop D2: the round cap — a problem while the plan is a draft or awaits re-review, a warning otherwise
+  for (const { r, round } of capBreaches(plan)) ((status === "draft" || review === "pending") && r.date >= ROUND_CAP_FROM ? problems : warnings).push(fmtV("roundCap", { n: r.n, r: round, k: r.n - 1 }));
+  // review-loop D3, D4: growth is a warning; the stopping signal is information only
+  const grown = growthWarning(plan);
+  if (grown) warnings.push(grown);
+  const signal = stoppingSignal(plan, gating);
+  if (signal) info.push(signal);
 
   // 5. done: everything verified, report present; epics: ≥1 child, all done
   if (status === "done") {
@@ -783,12 +1250,15 @@ export function checkPlan(plan, all = [plan]) {
   const dr = plan.assumptions.filter((a) => a.type === "decision-required").length;
   if (dr && status !== "draft") problems.push(`${dr} decision-required assumption(s) while status is ${status}`);
 
+  // 7a. calibration (D1, D2, D24): dry-run notes
+  { const ctx = { readySeq, reachedReady, history: storeMeta(all).history }; const c = calibChecks(plan, ctx); problems.push(...c.problems); warnings.push(...c.warnings); info.push(...ctx.info); }
+
   // 8. work packages (wbs-view D15–D17)
   const wbs = packageCheck(plan);
   problems.push(...wbs.problems);
   warnings.push(...wbs.warnings);
 
-  return { problems, warnings, verified: verified.size, preVerified: preVerified.size, total: plan.items.length, report: reportNumbers(plan, discoveredOps, wbs.grew) };
+  return { problems, warnings, info, verified: verified.size, preVerified: preVerified.size, total: plan.items.length, report: reportNumbers(plan, discoveredOps, wbs.grew) };
 }
 
 export function reportNumbers(plan, discoveredOps, grew = null) {
@@ -813,7 +1283,7 @@ export function reportNumbers(plan, discoveredOps, grew = null) {
   const rate = B ? Math.round((B / (B + G)) * 100) : null;
   // `grew` is the per-package growth of D17 when the caller has run the package checks; a plan with no
   // `## Work breakdown` section has no growth line at all, which is why null and [] are different answers
-  return { baseline: B, discoveredDesign: G, wrong, missedOps, ...kinds, rate, missed, grew: grew ?? (plan.hasWbs ? packageCheck(plan).grew : null) };
+  return { baseline: B, discoveredDesign: G, wrong, missedOps, ...kinds, rate, missed, grew: grew ?? (plan.hasWbs ? packageCheck(plan).grew : null), ...reworkCount(plan) };
 }
 
 // ---------------------------------------------------------------- atomic writes
@@ -1223,6 +1693,7 @@ export function renderIndex(plans, dir, opts = {}) {
     ...rows,
     "",
     `Most-missed layers — done plans: ${fmt(missedDone)}; open plans (provisional): ${fmt(missedOpen)}.`,
+    ...indexLines(plans, new Map([...checks].map(([s, c]) => [s, c.report]))),
     "",
     `${storeFooter(dir, opts)} Plans are the source of truth; this file is regenerated.`,
     "",
@@ -1347,12 +1818,12 @@ export function readAudience(dir) {
   const f = join(dir, "profile.md");
   let st;
   try { st = fsio.statSync(f, { throwIfNoEntry: false }); } catch (e) { return { kind: "unreadable", code: e.code ?? "error" }; }
-  if (!st) return { kind: "ok", audience: parseAudience("") };
+  if (!st) return { kind: "ok", audience: parseAudience(""), text: "" };
   if (st.size > PROFILE_CAP) return { kind: "oversize" };
   let text;
   try { text = fsio.readFileSync(f, "utf8"); } catch (e) { return { kind: "unreadable", code: e.code ?? "error" }; }
   if (Buffer.byteLength(text) > PROFILE_CAP) return { kind: "oversize" };
-  return { kind: "ok", audience: parseAudience(text) };
+  return { kind: "ok", audience: parseAudience(text), text };
 }
 
 export const AUDIENCE_MESSAGES = {
@@ -1367,14 +1838,17 @@ function profileCommand(dir) {
   if (r.kind === "unreadable") { console.log(AUDIENCE_MESSAGES.unreadable(r)); return 1; }
   if (r.kind === "oversize") { console.log(AUDIENCE_MESSAGES.oversize); return 1; }
   const a = r.audience;
-  if (!a.set) { console.log(AUDIENCE_MESSAGES.notSet); return 0; }
-  if (a.problems.length) {
+  let code = 0;
+  if (!a.set) console.log(AUDIENCE_MESSAGES.notSet);
+  else if (a.problems.length) {
     console.log(`audience: invalid — ${a.problems.length} problem(s); effective level expert until fixed`);
     for (const p of a.problems) console.log(`✗ audience: ${p}`);
-    return 1;
-  }
-  console.log(AUDIENCE_MESSAGES.summary(a));
-  return 0;
+    code = 1;
+  } else console.log(AUDIENCE_MESSAGES.summary(a));
+  // calibration D11: the host section after the audience
+  const h = hostReport(r.text);
+  for (const l of h.lines) console.log(plainText(l));
+  return h.failed ? 1 : code;
 }
 
 // One line, fixed field order, before the problem list: the plan's place in the tree and its health at a glance.
@@ -1452,6 +1926,283 @@ export function resolveStore(explicit, cwd = process.cwd()) {
   return distinct[0] ?? resolve(cwd, "docs", "dod");
 }
 
+// ---------------------------------------------------------------- review prompt (review-loop D5–D9, D14, D15)
+
+// review-loop 4.1: every number of the prompt builder, next to the code that uses it
+const PROMPT_BUDGET = 524_288; // bytes of cited code (D8)
+const CITE_CAP = 200; // citations considered, in order of first citation (D8)
+const REASON_LINES = 20; // exclusion lines printed per reason before "… and <n> more" (D8)
+const GIT_DEADLINE = 10_000; // ms shared by the three git calls (D9)
+const SWEEP_AGE = 24 * 3600 * 1000; // a prompt file older than this is eligible for the sweep (D14, epic D38)
+const ENV_MIN = 8; // environment values this long or longer never reach the prompt (D6)
+// D8: names that are never sent, and content that looks like a credential. The token patterns carry their length
+// so the patterns' own source text — this file is cited by plans — never matches itself.
+const REFUSED_NAMES = [/^\.env/i, /\.pem$/i, /\.key$/i, /\.p12$/i, /\.pfx$/i, /^id_rsa/i, /^id_ed25519/i, /^\.npmrc$/i, /^\.netrc$/i, /credential/i, /secret/i];
+const TOKEN_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\bghp_[A-Za-z0-9]{36}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{22,}/,
+  /\bsk-[A-Za-z0-9]{20,}/,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
+  /\bAKIA[A-Z0-9]{16}\b/,
+  /\bAIza[A-Za-z0-9_-]{35}/,
+  /\b(?:api_key|secret|token|password)\s*[=:]\s*(["'])[^"'\r\n]{12,}\1/i,
+];
+const PROMPT_NAME_RE = /^dod-review-([0-9a-f]{12})-(dod-\d{8}-[a-z0-9]{4})-(\d{4}-\d{2}-\d{2})\.txt$/;
+
+export const storeHash = (dir) => sha256(realpathSync(dir)).slice(0, 12);
+export const promptFileName = (dir, planId, date = localDate()) => `dod-review-${storeHash(dir)}-${planId}-${date}.txt`;
+
+// review-loop D9: the only process the prompt builder starts. The runner is a parameter so the selftest can
+// substitute a result without a real spawn; every call shares one deadline, and each call's timeout is what is
+// left of it — a call with nothing left is never made. Fixed arguments, no shell, and GIT_OPTIONAL_LOCKS=0 so
+// `status` never rewrites the index.
+export function gitReader({ run = spawnSync, clock = Date.now, deadline = GIT_DEADLINE } = {}) {
+  const end = clock() + deadline;
+  return (cwd, argv) => {
+    const left = end - clock();
+    if (left <= 0) return { fail: fmtV("gitTimeout") };
+    const r = run("git", ["-C", cwd, ...argv], { shell: false, timeout: left, windowsHide: true, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+    if (r?.error) return { fail: r.error.code === "ETIMEDOUT" ? fmtV("gitTimeout") : fmtV("gitExit", { code: r.error.code ?? "error" }) };
+    if (r?.status !== 0) return { fail: /not a git repository/i.test(String(r?.stderr ?? "")) ? fmtV("noRepo") : fmtV("gitExit", { code: r?.status ?? "none" }) };
+    return { out: String(r.stdout ?? "") };
+  };
+}
+
+// `git status --porcelain=v1 -z`: `XY <path>` records separated by NUL; a rename or copy carries its source as the
+// next record. Output with no NUL at all cannot be read, and null tells the caller to treat every file untracked.
+export function parseStatusZ(out) {
+  const map = new Map();
+  if (!out) return map;
+  if (!out.includes("\0")) return null;
+  const recs = out.split("\0");
+  for (let k = 0; k < recs.length; k++) {
+    const r = recs[k];
+    if (r.length < 4 || r[2] !== " ") continue;
+    map.set(r.slice(3), r.slice(0, 2));
+    if (r[0] === "R" || r[0] === "C") k++;
+  }
+  return map;
+}
+
+// The plan's citations: backtick spans before `## Report` that are shaped like a path — no whitespace, no
+// placeholder, not a URL or a version, and carrying a `/`, a `.` or a shell character (a hostile span is cited and
+// ends `not found`, never dropped). `:12`, `:12-30` and ` › symbol` suffixes are removed and `\` read as `/`.
+export function planCitations(text) {
+  const cut = text.search(/^## Report\s*$/m);
+  const body = cut < 0 ? text : text.slice(0, cut);
+  const out = [], seen = new Set();
+  for (const m of body.matchAll(/`([^`\n]+)`/g)) {
+    const c = m[1].trim().replace(/ › .*$/, "").replace(/:\d+(?:-\d+)?$/, "").replace(/\\/g, "/");
+    if (!c || /[^\S\r]/.test(c) || /[<>]/.test(c) || c.includes("://") || /^v?\d+(?:\.\d+)*$/.test(c) || !/[/.;$=()&|]/.test(c)) continue;
+    if (!seen.has(c)) { seen.add(c); out.push(c); }
+  }
+  return out;
+}
+
+const realFs = { lstat: (p) => lstatSync(p), realpath: (p) => realpathSync(p), read: (p) => readFileSync(p) };
+const within = (root, p) => { const r = relative(root, p); return !r.startsWith("..") && !/^[A-Za-z]:/.test(r) && !r.startsWith("/") ; };
+const posix = (p) => p.split(sep).join("/");
+
+// review-loop D8: the pure selection. `status` is git's map (null: unreadable, so every file is untracked); the
+// first failing rule is the reason, and the secret rules come before the budget, so a secret is never reported as
+// merely too large (4.4).
+export function selectFiles({ citations, root, store, status, fsx = realFs, budget = PROMPT_BUDGET, cap = CITE_CAP }) {
+  const included = [], excluded = [];
+  let left = budget;
+  const realRoot = fsx.realpath(root), realStore = fsx.realpath(store);
+  citations.forEach((c, k) => {
+    const out = (reason) => excluded.push({ path: c, reason });
+    if (k >= cap) return out(fmtV("overCap"));
+    const abs = resolve(realRoot, c);
+    let st;
+    try { st = fsx.lstat(abs); } catch { return out(fmtV("notFound")); }
+    if (st.isSymbolicLink()) return out(fmtV("link"));
+    if (!st.isFile()) return out(fmtV("notFound"));
+    let real;
+    try { real = fsx.realpath(abs); } catch { return out(fmtV("notFound")); }
+    if (!within(realRoot, real)) return out(fmtV("outside"));
+    const rel = posix(relative(realRoot, real));
+    const xy = status === null ? "??" : status.get(rel);
+    if (xy === "??") return out(fmtV("untracked"));
+    if (xy === "!!") return out(fmtV("ignored"));
+    if (within(realStore, real)) return out(fmtV("inStore"));
+    if (REFUSED_NAMES.some((re) => re.test(basename(real)))) return out(fmtV("refusedName"));
+    const buf = fsx.read(real);
+    if (buf.subarray(0, 8192).includes(0)) return out(fmtV("binary"));
+    let text;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch { return out(fmtV("notUtf8")); }
+    const lines = text.split(/\r?\n/);
+    const hit = lines.findIndex((l) => TOKEN_PATTERNS.some((re) => re.test(l)));
+    if (hit >= 0) return out(fmtV("tokenShaped", { n: hit + 1 }));
+    if (buf.length > left) return out(fmtV("overBudget", { bytes: buf.length, left }));
+    left -= buf.length;
+    included.push({ path: rel, bytes: buf.length, sha: sha256(buf).slice(0, 12), text });
+  });
+  return { included, excluded };
+}
+
+// the exclusion list, bounded: at most REASON_LINES per reason, then one line counting the rest
+export function exclusionLines(excluded) {
+  const byReason = new Map();
+  for (const e of excluded) { const key = e.reason.replace(/ \(.*\)$| at line \d+$/, ""); if (!byReason.has(key)) byReason.set(key, []); byReason.get(key).push(e); }
+  const lines = [];
+  for (const [key, es] of byReason) {
+    for (const e of es.slice(0, REASON_LINES)) lines.push(`${e.path} — ${e.reason}`);
+    if (es.length > REASON_LINES) lines.push(fmtV("more", { n: es.length - REASON_LINES, reason: key }));
+  }
+  return lines;
+}
+export const manifestHash = (included) => sha256(included.map((f) => `${f.path} ${f.sha}`).sort().join("\n")).slice(0, 12);
+
+// review.md's rubric block, without its `> ` markers
+export function rubricBlock(reviewMd) {
+  const lines = reviewMd.replace(/\r\n/g, "\n").split("\n");
+  const at = lines.findIndex((l) => /^## The rubric\b/.test(l));
+  if (at < 0) return "";
+  const out = [];
+  for (const l of lines.slice(at + 1)) { if (/^## /.test(l)) break; if (/^>/.test(l)) out.push(l.replace(/^> ?/, "")); }
+  return out.join("\n");
+}
+
+// review.md's score redaction: Status and Probes blanked on the Coverage rows, coverage_author dropped, everything
+// from the `## Report` heading line onward omitted (a sentence mentioning it stays)
+export function redactPlan(text) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  let blanked = 0, inFm = false, inCov = false;
+  for (let k = 0; k < lines.length; k++) {
+    const l = lines[k];
+    if (/^## Report\s*$/.test(l)) break;
+    if (k === 0 && l === "---") { inFm = true; out.push(l); continue; }
+    if (inFm) { if (l === "---") inFm = false; else if (/^coverage_author:/.test(l)) continue; out.push(l); continue; }
+    if (/^## /.test(l)) inCov = /^## Coverage\b/.test(l);
+    const m = inCov ? l.match(RE.coverage) : null;
+    if (m) { out.push(`| ${m[1]} | ${m[2].trim()} |  |  | ${m[5].trim()} |`); blanked++; continue; }
+    out.push(l);
+  }
+  return { text: out.join("\n"), blanked, hasLog: out.some((l) => /^## Log\s*$/.test(l)) };
+}
+
+// D6: every environment value of ENV_MIN or more characters is replaced, longest first
+export function redactEnv(text, env = process.env) {
+  const values = [...new Set(Object.values(env).filter((v) => typeof v === "string" && v.length >= ENV_MIN))].sort((a, b) => b.length - a.length);
+  let n = 0;
+  for (const v of values) { if (!text.includes(v)) continue; n += text.split(v).length - 1; text = text.split(v).join("[environment value withheld]"); }
+  return { text, n };
+}
+
+// D14: stale prompt files of this store's plans, and nothing else
+export function sweepPrompts(tmp, hash, planIds, now = Date.now()) {
+  const removed = [];
+  let names = [];
+  try { names = readdirSync(tmp); } catch { return removed; }
+  for (const f of names) {
+    const m = f.match(PROMPT_NAME_RE);
+    if (!m || m[1] !== hash || !planIds.has(m[2])) continue;
+    try { const st = lstatSync(join(tmp, f)); if (st.isFile() && now - st.mtimeMs > SWEEP_AGE) { rmSync(join(tmp, f), { force: true }); removed.push(f); } } catch { /* gone already */ }
+  }
+  return removed;
+}
+
+// the run a new review would join: its number, and its round within the run
+export function nextRound(plan) {
+  const n = (plan.reviews.at(-1)?.n ?? 0) + 1;
+  return { n, round: reviewRun(plan.reviews).run.length + 1 };
+}
+
+// --review-prompt: returns { code, lines } — lines are printed by the caller through the control-character stripper
+export function reviewPrompt(dir, plans, args, { git = gitReader(), readBack = (p) => readFileSync(p), tmp = tmpdir(), env = process.env, now = new Date() } = {}) {
+  const fail = (text) => ({ code: 1, lines: [text] });
+  const slug = args.slug, reviewer = args.reviewer ?? "codex";
+  if (!slug || !REVIEWERS.includes(reviewer) || (args.scope !== undefined && !/^A\d+(,A\d+)*$/.test(args.scope))) return fail(fmtV("promptUsage"));
+  const plan = plans.find((p) => p.slug === slug);
+  if (!plan) return fail(fmtV("promptNoPlan", { slug }));
+  const scope = args.scope ? args.scope.split(",") : null;
+  for (const id of scope ?? []) if (!plan.amendments.some((a) => a.id === id)) return fail(fmtV("promptScopeUnknown", { id, slug }));
+  const problems = checkPlan(plan, plans).problems;
+  if (problems.length) return fail(fmtV("promptProblems", { slug, k: problems.length }));
+  const { n, round } = nextRound(plan);
+  if (reviewer !== "human" && round > ROUND_CAP && !capCovered(plan, n)) return fail(fmtV("promptRoundCap", { n, r: round, k: n - 1 }));
+  const planText = new TextDecoder("utf-8").decode(readFileSync(plan.file));
+  const red = redactPlan(planText);
+  if (!red.hasLog) return fail(fmtV("promptRedaction", { what: "lacks the ## Log heading" }));
+  if (red.blanked !== 15) return fail(fmtV("promptRedaction", { what: `has ${red.blanked} blanked Coverage rows, not 15` }));
+  const refs = join(dirname(SELF), "..", "references");
+  const rubric = rubricBlock(readFileSync(join(refs, "review.md"), "utf8"));
+  const layers = readFileSync(join(refs, "layers.md"), "utf8");
+
+  // git: the repository root, HEAD, and the status of every citation and of the plan itself (D9)
+  const citations = planCitations(planText);
+  let code = { included: [], excluded: [], none: null }, commit = null, planDirty = true;
+  const top = git(dir, ["rev-parse", "--show-toplevel"]);
+  if (top.fail) code.none = top.fail;
+  else {
+    const root = top.out.trim();
+    const head = git(root, ["rev-parse", "--short", "HEAD"]);
+    const planRel = posix(relative(realpathSync(root), realpathSync(plan.file)));
+    // git refuses the whole call for a pathspec outside the repository, so only the citations that resolve
+    // inside it are asked about; the rest end `not found` or `outside the repository` without git
+    const inside = citations.map((c) => posix(relative(root, resolve(root, c)))).filter((r) => r && !r.startsWith("..") && !/^[A-Za-z]:/.test(r) && !r.startsWith("/"));
+    const st = head.fail ? head : git(root, ["status", "--porcelain=v1", "--ignored", "-z", "--", ...[planRel, ...new Set(inside)].map((c) => `:(literal)${c}`)]);
+    if (st.fail) code.none = st.fail;
+    else {
+      const status = parseStatusZ(st.out);
+      commit = head.out.trim();
+      planDirty = status === null || status.has(planRel);
+      if (!citations.length) code.none = fmtV("citesNone");
+      else code = { ...selectFiles({ citations, root, store: dir, status }), none: null };
+    }
+  }
+  const mhash = manifestHash(code.included);
+  const codeSection = code.none
+    ? `## Code files\n\n${fmtV("noCodeFiles", { reason: code.none })}\n`
+    : `## Code files\n\n${code.included.map((f) => `=== ${f.path} · sha256 ${f.sha} · ${f.bytes} B ===\n${f.text}${f.text.endsWith("\n") ? "" : "\n"}`).join("\n")}${code.excluded.length ? `\nLeft out:\n${exclusionLines(code.excluded).map((l) => `- ${l}`).join("\n")}\n` : ""}`;
+
+  // D7 and D10: the later-round preamble and request, and the scope paragraph
+  const { run } = reviewRun(plan.reviews);
+  const last = plan.reviews.at(-1);
+  const k = run.length && last ? Math.max(0, ...[...last.findings].map(Number)) : 0;
+  const parts = [];
+  if (k) parts.push(`This is a revised plan; your earlier findings were F1–F${k}.`);
+  // D6, A3: environment values are withheld from the text that comes from the user — the code files, the scope
+  // rows and the plan — while the rubric and layers.md, the skill's own text, go verbatim
+  let withheld = 0;
+  const own = (x) => { const r = redactEnv(x, env); withheld += r.n; return r.text; };
+  parts.push(rubric, layers.replace(/\s+$/, ""), own(codeSection.replace(/\s+$/, "")));
+  if (scope) {
+    const rows = scope.map((id) => { const a = plan.amendments.find((x) => x.id === id); return `- ${a.id} · layer ${a.layer} · ${a.ops.join(" ")} · ${a.why}`; });
+    parts.push(`This is a scoped re-review of ${scope.join(", ")}:\n${own(rows.join("\n"))}\nThe rest of the plan is frozen context: it was reviewed before and is not regraded here. Still write your coverage line over all fifteen layers. Tag every finding about text outside this scope advisory, never blocking.`);
+  }
+  if (k) parts.push("Before your coverage line, write exactly one extra line: `EARLIER: all resolved`, or `EARLIER: unresolved F2, F5` naming the earlier findings you still consider open.");
+  parts.push(`The plan:\n\n${own(red.text.replace(/\s+$/, ""))}`);
+  const text = parts.join("\n\n") + "\n";
+
+  // D14, D5: sweep, write, read back
+  const hash = storeHash(dir);
+  const date = localDate(now);
+  const name = `dod-review-${hash}-${plan.fm.id}-${date}.txt`;
+  sweepPrompts(tmp, hash, new Set(plans.map((p) => p.fm.id).filter(Boolean)), now.getTime());
+  const path = join(tmp, name);
+  const bytes = Buffer.from(text, "utf8");
+  try { writeAtomic(path, bytes); } catch (e) { return fail(fmtV("promptCannotWrite", { path: name, code: e.code ?? "error" })); }
+  let back;
+  try { back = readBack(path); } catch { back = Buffer.alloc(0); }
+  if (sha256(back) !== sha256(bytes)) return fail(fmtV("promptReplaced", { name }));
+  const phash = sha256(bytes).slice(0, 12);
+  const size = statSync(plan.file).size;
+  const heading = `## Review ${n} · ${date} · ${reviewer} · ${planDirty || !commit ? "plan uncommitted" : `plan commit ${commit}`} · plan ${size} B · ${plan.items.length} items · files ${code.included.length} · ${mhash} · prompt ${phash}${scope ? ` · scope ${scope.join(",")}` : ""}`;
+  const lines = [
+    `review-prompt: wrote ${name} in the temporary folder ($TMPDIR, or %TEMP% on Windows) · ${bytes.length} B`,
+    `heading: ${heading}`,
+    code.none ? fmtV("noCodeFiles", { reason: code.none }) : `code files: ${code.included.length} included · ${code.excluded.length} left out`,
+    ...code.included.map((f) => `  included ${f.path} · sha256 ${f.sha} · ${f.bytes} B`),
+    ...exclusionLines(code.excluded).map((l) => `  left out ${l}`),
+  ];
+  if (withheld) lines.push(`withheld ${withheld} environment value(s) of ${ENV_MIN}+ characters`);
+  return { code: 0, lines, path, heading, text };
+}
+
 // ---------------------------------------------------------------- selftest
 
 // Seed a random 24-char secret into the environment before any render, so the leak scan can prove that nothing
@@ -1465,6 +2216,7 @@ function seedSecret(rb = randomBytes) {
 }
 
 function selftest(deps = {}) {
+  const startedAt = performance.now();
   let secret;
   try { secret = seedSecret(deps.randomBytes); } catch { console.log("selftest: no entropy for DOD_TEST_SECRET"); return 1; }
   const rendered = [];
@@ -1669,7 +2421,8 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
 
     // --- index-legacy-footer: a README written by dod ≤ 0.1.2 is warned about by --check-index and --check
     const capture = (fn) => { const out = [], err = []; const { log, error } = console; console.log = (...a) => out.push(a.join(" ")); console.error = (...a) => err.push(a.join(" ")); try { const code = fn(); return { code, out: out.join("\n"), err: err.join("\n") }; } finally { console.log = log; console.error = error; } };
-    const run = (...a) => capture(() => main(["node", SELF, ...a, "--dir", dir]));
+    // calibration D11 appends the host lines to --profile; these cases compare the audience lines alone
+    const run = (...a) => { const r = capture(() => main(["node", SELF, ...a, "--dir", dir])); return a[0] === "--profile" ? { ...r, out: r.out.split("\n").filter((l) => !/^(✗ )?host: /.test(l)).join("\n") } : r; };
     const WARN = LEGACY_MESSAGES.absolute;
     const legacyResults = [];
     for (const abs of ["C:\\Users\\example\\repo\\docs\\dod", "/home/example/repo/docs/dod"]) {
@@ -1775,7 +2528,8 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
 
     const ok = g.problems.length === 0 && t.problems.length === 0 && missed.length === 0 && rate === 67 && fresh && stale && g.verified === 1 && storeOk && indexRelative && legacyFooterOk && leakScan && audienceProfile && v2.ok;
     console.log(`selftest: known-good problems=${g.problems.length} verified=${g.verified}/${g.total} rate=${rate}%  cancelled-after-ready problems=${t.problems.length}  known-bad caught ${caught.length + caught2.length}/${expectBad.length + expectBad2.length}  index fresh=${fresh} stale-detected=${stale}  store-with-spaces=${storeOk}  index-relative=${indexRelative} legacy-footer=${legacyFooterOk} leak-scan=${leakScan} audience-profile=${audienceProfile}`);
-    console.log(`selftest v0.2: ${v2.summary}`);
+    if (deps.timing) for (const line of v2.slowest) console.log(line);
+    console.log(`selftest v0.2: ${v2.summary} in ${Math.round(performance.now() - startedAt)} ms`);
     if (!v2.ok) for (const d of v2.details) console.log(`  v0.2 failed: ${d}`);
     if (!ok) {
       console.log("  index-relative:", { under: footerOf(under), equal: footerOf(equal), outside: footerOf(outside), hostile: hostileFooter, driveLike: footerOf(driveLike), crossRoot: footerOf(crossRoot) });
@@ -1804,13 +2558,20 @@ const sha256 = (t) => createHash("sha256").update(t).digest("hex");
 
 function selftestV2(ctx) {
   const { tmp, fm, coverage, sections, base, goodReviews, fixtures, capture } = ctx;
-  const results = [], details = [];
-  const expect = (name, cond, info = "") => { results.push([name, Boolean(cond)]); if (!cond) details.push(`${name}${info ? ` — ${info}` : ""}`); };
+  const results = [], details = [], gaps = [];
+  // plan-limits D7: each case's cost is the gap since the case before it — the fixture work between two expect()
+  // calls belongs to the later one — so `--timing` can name the ten slowest
+  let lastAt = performance.now();
+  const expect = (name, cond, info = "") => {
+    const now = performance.now(); gaps.push([name, now - lastAt]); lastAt = now;
+    results.push([name, Boolean(cond)]); if (!cond) details.push(`${name}${info ? ` — ${info}` : ""}`);
+  };
   let n = 0;
   const store = (files) => { const d = join(tmp, `v2-${n++}`); mkdirSync(d, { recursive: true }); for (const [f, t] of Object.entries(files)) writeFileSync(join(d, f), t); return d; };
   const snapshot = (d) => { const out = {}; const walk = (x) => { for (const f of readdirSync(x, { withFileTypes: true })) { const p = join(x, f.name); if (f.isDirectory()) walk(p); else out[relative(d, p)] = sha256(readFileSync(p)); } }; walk(d); return JSON.stringify(out); };
   const cli = (d, ...a) => capture(() => main(["node", SELF, ...a, "--dir", d]));
-  const node = (args, opts = {}) => spawnSync(process.execPath, args, { encoding: "utf8", timeout: 30_000, ...opts });
+  // file-organizer A1: Node's default 1 MiB buffer killed `--strip-v2` over the live store (ENOBUFS) once it grew
+  const node = (args, opts = {}) => spawnSync(process.execPath, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 * 1024, ...opts });
   let idn = 0;
   const nextId = () => `dod-20260918-${(idn++).toString(36).padStart(4, "0")}`;
   const ITEMS = "- [ ] D1 · Export downloads as CSV · test: export.test.ts\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors";
@@ -2109,6 +2870,60 @@ function selftestV2(ctx) {
     expect("template-sync", texts.length >= 15 && missing.length === 0, `${texts.length} texts; missing ${JSON.stringify(missing)}`);
   }
 
+  // template-sync-review (review-loop D11): every text D2–D5, D8 and D10 print, and the heading and note tokens,
+  // all in plan-template.md › "Review loop — cap, growth, signal, scope". The expected list is copied, not exported.
+  {
+    const tpl = join(dirname(SELF), "..", "references", "plan-template.md");
+    const t = existsSync(tpl) ? readFileSync(tpl, "utf8").replace(/\r\n/g, "\n") : "";
+    const at = t.indexOf("## Review loop — cap, growth, signal, scope");
+    const sec = at < 0 ? "" : t.slice(at, t.indexOf("\n## ID legend", at));
+    const EXPECTED = [
+      "Review <n> is round <r> of a run with no READY — log \"note · round cap · after Review <k> · owner: <decision>\" before it",
+      "review growth: Review <a> <x> KB · <i> items → Review <b> <y> KB · <j> items, +<p> % in this run",
+      "review loop: <k> rounds since <since> · stopping signal met at Review <n>",
+      "review loop: <k> rounds since <since> · stopping signal not met at Review <n> — <reason>",
+      "F<f> is untagged",
+      "F<f> is blocking and quotes no probe",
+      "F<f> quotes gating probe <p>",
+      "F<f> re-raises <p> from Review <m>",
+      "Review <n> is scoped <id>, which is not an amendment of this plan",
+      "Review <n> is scoped <ids>; F<f> is blocking but quotes only <probes>, outside the scope — advisory by the scope rule: disposition it advisory, or rerun unscoped",
+      "review-prompt: Review <n> would be round <r> of a run with no READY — log \"note · round cap · after Review <k> · owner: <decision>\" first, or build with --reviewer human",
+      "usage: dod-index.mjs --review-prompt <slug> [--reviewer codex|subagent|human] [--scope A<n>,…] [--dir <store>]",
+      "review-prompt: no plan <slug> in the store",
+      "review-prompt: <slug> has <k> check problem(s) — fix them first",
+      "review-prompt: the redacted plan <what> — not written",
+      "review-prompt: <id> is not an amendment of <slug>",
+      "review-prompt: cannot write <path> (<code>)",
+      "review-prompt: <name> was replaced by another run — build again",
+      "no code files: <reason>",
+      "the plan cites none",
+      "not a git repository",
+      "git timed out after 10 s",
+      "git exited <code>",
+      "… and <n> more: <reason>",
+      "not found",
+      "a link",
+      "outside the repository",
+      "untracked",
+      "ignored",
+      "in the plan store",
+      "refused name",
+      "binary",
+      "not UTF-8",
+      "token-shaped content at line <n>",
+      "over budget (<bytes> B, <left> B left)",
+      "over the 200-citation cap",
+    ];
+    const have = Object.values(MESSAGES_REVIEW);
+    const lacking = EXPECTED.filter((x) => !have.includes(x));
+    const extra = have.filter((x) => !EXPECTED.includes(x));
+    const notInTemplate = have.filter((x) => !sec.includes(x));
+    const TOKENS = ["note · round cap · after Review", "through Review", "· plan", "B ·", "items", "· files", "· prompt", "· scope", "own commit"];
+    const noToken = TOKENS.filter((x) => !sec.includes(x));
+    expect("template-sync-review", sec.length > 0 && !lacking.length && !extra.length && !notInTemplate.length && !noToken.length, JSON.stringify({ lacking, extra, notInTemplate, noToken }));
+  }
+
   // template-sync-accuracy (plan-accuracy D14): the messages this child adds, the grammar tokens and one
   // example row, all read from plan-template.md. The expected list is copied from the D-items, not the export.
   {
@@ -2171,14 +2986,40 @@ function selftestV2(ctx) {
       JSON.stringify(block.slice(-320)));
   }
 
-  // limits (D21): 501 items warn and are still checked; a 10,001-character line is reported and skipped
+  // limits (plan-limits D1–D3, after wbs-view D31 / D21): a line over 10,000 characters is a PROBLEM and is parsed as
+  // written — the D-item on it is still counted; a plan over 500 items or over 1 MB WARNS and is checked whole
   {
-    const many = Array.from({ length: 501 }, (_, k) => `- [ ] D${k + 1} · item ${k + 1} · test: t${k + 1}`).join("\n");
-    const d = store(withReviews({ "big.md": plan("big", { items: many }), "long.md": plan("long", { extra: `## Notes\n${"x".repeat(10001)}\n\n` }) }));
+    const pad = (len, seed) => `${seed}${" x".repeat(Math.ceil((len - seed.length) / 2))}`.slice(0, len);
+    const withLong = (len) => {
+      const third = pad(len, "- [ ] D3 · A very long item · test: long.test.ts (fails when: the input is empty)");
+      return plan("long", { items: `${ITEMS}\n${third}`, baseline: `${ITEMS}\n${third}` });
+    };
+    const d = store(withReviews({ "long.md": withLong(10001), "edge.md": withLong(10000).replace("slug: long", "slug: edge").replace("# DoD: long", "# DoD: edge") }));
     const c = checkIn(d);
-    const big = c.get("big"), long = c.get("long");
-    expect("limits", big.warnings.includes("plan exceeds 500 items") && big.total === 501 && big.problems.length === 0
-      && long.warnings.some((w) => /^line \d+ is over 10,000 characters — skipped$/.test(w)) && long.problems.length === 0, JSON.stringify([big.problems.slice(0, 3), long.warnings]));
+    const long = c.get("long"), edge = c.get("edge");
+    const lineProblem = long.problems.find((x) => /^line \d+ is over 10,000 characters$/.test(x));
+    expect("limits.line", Boolean(lineProblem) && long.total === 3 && c.plan("long").items.some((i) => i.id === "D3")
+      && !long.warnings.some((w) => /10,000/.test(w)) && long.problems.filter((x) => /10,000/.test(x)).length === 2 /* the live line and its Baseline copy */
+      && edge.problems.length === 0 && !edge.warnings.some((w) => /10,000/.test(w)) && edge.total === 3,
+      JSON.stringify([long.problems, long.warnings, long.total, edge.problems, edge.warnings]));
+    // 501 items and 1 MB + 1 byte: one warning each, no problem, every item still parsed
+    const many = Array.from({ length: 501 }, (_, k) => `- [ ] D${k + 1} · item ${k + 1} · test: t${k + 1}`).join("\n");
+    const filler = Array.from({ length: 120 }, () => "x".repeat(9000)).join("\n"); // 1,080,120 bytes of lines under the line cap
+    const d2 = store(withReviews({ "big.md": plan("big", { items: many }), "huge.md": plan("huge", { extra: `## Notes\n${filler}\n\n` }) }));
+    const c2 = checkIn(d2);
+    const big = c2.get("big"), huge = c2.get("huge");
+    expect("limits.warn", big.warnings.includes("plan exceeds 500 items") && big.total === 501 && big.problems.length === 0
+      && huge.warnings.includes("plan exceeds 1 MB") && huge.problems.length === 0 && huge.total === 2
+      && statSync(join(d2, "huge.md")).size > LIMITS.bytes, JSON.stringify([big.problems.slice(0, 3), big.warnings, huge.problems, huge.warnings]));
+    // the two documents that state the limits say what the code does now, and the old sentences are gone (D3)
+    const tpl = readFileSync(join(dirname(SELF), "..", "references", "plan-template.md"), "utf8").replace(/\r/g, "");
+    const readme = readFileSync(join(dirname(SELF), "..", "README.md"), "utf8").replace(/\r/g, "");
+    const need = { tpl: ["`line <n> is over 10,000 characters` is a problem", "`plan exceeds 1 MB` and `plan exceeds 500 items` are warnings"], readme: ["a line over 10,000 characters is a problem"] };
+    // the old sentence was "`line <n> is over 10,000 characters — skipped`"; calibration's messages end "— skipped" too
+    const gone = { tpl: ["Limits are warnings, never problems", "characters — skipped"], readme: ["is warned about, not refused"], both: ["is a dod 0.3 decision"] };
+    const missing = [...need.tpl.filter((s) => !tpl.includes(s)).map((s) => `template lacks ${s}`), ...need.readme.filter((s) => !readme.includes(s)).map((s) => `README lacks ${s}`)];
+    const stale = [...gone.tpl.filter((s) => tpl.includes(s)), ...gone.readme.filter((s) => readme.includes(s)), ...gone.both.filter((s) => tpl.includes(s) || readme.includes(s))];
+    expect("limits.documented", missing.length === 0 && stale.length === 0, JSON.stringify({ missing, stale }));
   }
 
   // titles-legend (plan-readability D1–D3, D5): titles, untitled items by format version, S-n assumptions, labels
@@ -2634,7 +3475,7 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     };
     const w = (o = {}) => { const slug = o.slug ?? "wb"; const d = store({ [`${slug}.md`]: wplan(o), [`${slug}.reviews.md`]: rev2 }); return checkIn(d).get(slug); };
     const grammarErrs = (c) => c.problems.filter((x) => x.startsWith("Work breakdown: "));
-    const wbsProblems = (c) => c.problems.filter((x) => /work package|leaf packages|which is not an item or a step|## Work breakdown/.test(x));
+    const wbsProblems = (c) => c.problems.filter((x) => /work package|leaf packages|which is not an item or a step|## Work breakdown|names package/.test(x));
 
     // --- D14 grammar: one problem per line that does not match, naming the line
     const noTitle = w({ wbs: "- W1.1 · A leaf with no bold title · items: D1 D2 · steps: 1, 2" });
@@ -2723,9 +3564,28 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     const parentAmend = parsePlan(wplan({ items: FIVE, baseline: TWO, wbs: growWbs, amend: A(1, "discovered", "+D3", "W1.1").replace("package: W1.1", "package: W1") }), "wb.md").amendments[0];
     expect("wbs.grew-parent-is-not-a-leaf", parentPkg.problems.includes(fmtW("addsNoPackage", { An: "A1", Dn: "D3" }))
       && parentAmend.package === null && grewLine(parentPkg.report.grew) === "grew: none", JSON.stringify([parentPkg.problems, parentAmend.package]));
-    // ... and the order is by count, not by id: one under W1.1, three under W2.1
-    const order = w({ items: FIVE, baseline: TWO, wbs: growWbs, amend: A(1, "discovered", "+D3", "W1.1") + A(2, "discovered", "+D4 +D5", "W2.1") + A(3, "discovered", "+D3", "W2.1") });
-    expect("wbs.grew-order-by-count", grewLine(order.report.grew) === "grew: W2.1 +3 · W1.1 +1", grewLine(order.report.grew));
+    // ... and the order is by count, not by id: one under W1.1, three under W2.1 (each amendment names the leaf
+    // that lists its items — plan-limits D5 refuses any other)
+    const orderWbs = "- W1 · **The tree**\n- W1.1 · **One** · items: D1 D3 · steps: 1\n- W2.1 · **Two** · items: D2 D4 D5 · steps: 2";
+    const order = w({ items: FIVE, baseline: TWO, wbs: orderWbs, amend: A(1, "discovered", "+D3", "W1.1") + A(2, "discovered", "+D4 +D5", "W2.1") + A(3, "discovered", "+D2", "W2.1") });
+    expect("wbs.grew-order-by-count", wbsProblems(order).length === 0 && grewLine(order.report.grew) === "grew: W2.1 +3 · W1.1 +1", JSON.stringify([wbsProblems(order), grewLine(order.report.grew)]));
+    // plan-limits D5 (wbs-view F4): the named leaf must list the item. W1.2 lists D2 D3 D4 and W2.1 lists D5:
+    // an amendment adding D5 under W1.2 is reported with the leaf that owns D5, and nothing grows
+    const elsewhere = w({ items: FIVE, baseline: TWO, wbs: growWbs, amend: A(1, "discovered", "+D5", "W1.2") });
+    expect("wbs.growth-owner", elsewhere.problems.includes(fmtW("growthElsewhere", { An: "A1", Wid: "W1.2", Dn: "D5", Wother: "W2.1" }))
+      && grewLine(elsewhere.report.grew) === "grew: none", JSON.stringify([elsewhere.problems, grewLine(elsewhere.report.grew)]));
+    // ... an item no leaf lists is reported as owned by no package (beside the ownership problem D15 already raises)
+    const unownedWbs = "- W1 · **The tree**\n- W1.1 · **One** · items: D1 · steps: 1\n- W1.2 · **Two** · items: D2 D3 D4 · steps: 2";
+    const unowned = w({ items: FIVE, baseline: TWO, wbs: unownedWbs, amend: A(1, "discovered", "+D5", "W1.2") });
+    expect("wbs.growth-owner-none", unowned.problems.includes(fmtW("growthUnowned", { An: "A1", Wid: "W1.2", Dn: "D5" }))
+      && unowned.problems.includes(fmtW("ownedByNone", { Dn: "D5" })) && grewLine(unowned.report.grew) === "grew: none", JSON.stringify([unowned.problems, grewLine(unowned.report.grew)]));
+    // ... silent: the leaf that lists it, and the growth is counted once
+    const ownedOk = w({ items: FIVE, baseline: TWO, wbs: growWbs, amend: A(1, "discovered", "+D5", "W2.1") });
+    expect("wbs.growth-owner-silent", wbsProblems(ownedOk).length === 0 && grewLine(ownedOk.report.grew) === "grew: W2.1 +1", JSON.stringify([wbsProblems(ownedOk), grewLine(ownedOk.report.grew)]));
+    // ... an amendment adding two items under one leaf counts only the one that leaf lists, and names the other
+    const split = w({ items: FIVE, baseline: TWO, wbs: growWbs, amend: A(1, "discovered", "+D4 +D5", "W1.2") });
+    expect("wbs.growth-owner-partial", split.problems.includes(fmtW("growthElsewhere", { An: "A1", Wid: "W1.2", Dn: "D5", Wother: "W2.1" }))
+      && grewLine(split.report.grew) === "grew: W1.2 +1", JSON.stringify([split.problems, grewLine(split.report.grew)]));
     // ... and a removal is not growth
     const removal = w({ wbs: growWbs, items: FIVE, baseline: FIVE, amend: A(1, "discovered", "-D5 ~D1", "W1.1") });
     expect("wbs.grew-removal-is-not-growth", grewLine(removal.report.grew) === "grew: none" && !removal.problems.some((x) => x.includes("adds")), JSON.stringify([grewLine(removal.report.grew), removal.problems]));
@@ -3241,8 +4101,683 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     expect("timing migrate-500", mr.code === 0 && mr.out.split("\n").length === 52 && (process.env.DOD_SELFTEST_TIMING !== "assert" || mms <= 1000), `${mms} ms ${mr.err}`);
   }
 
+  // review-loop D1–D4, D10: finding tags and probes, the round cap, growth, the stopping signal, scoped re-review
+  {
+    const RL = "2026-09-27";
+    const sum2 = RUBRIC[2].counts.reduce((x, y) => x + y, 0);
+    const tot2 = `15/15 layers · ${sum2}/${sum2} probes`;
+    const CL = "- [ ] D1 · Export downloads as CSV · test: export.test.ts (fails when: the export is empty)\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors (fails when: an unused import is added)";
+    const rv = (n, o = {}) => `## Review ${n} · ${o.date ?? RL} · ${o.by ?? "codex"}${o.head ?? ""}\n${o.body ?? "F1 blocking · the rollout section is thin"}\n${tot2}\nVERDICT: ${o.v ?? "REVISE"}\n### Dispositions\n${o.disp ?? "- F1 · accepted · applied"}\n`;
+    const rl = (reviews, o = {}) => {
+      const text = plan("rl", { items: CL, baseline: CL, fm: { rubric: "2", review: "pending", coverage_author: tot2, coverage_reviewer: tot2, ...(o.fm ?? {}) }, coverage: { rubric: 2, all: true }, log: o.log ?? "", ...(o.amend ? { amend: o.amend } : {}) });
+      const d = store({ "rl.md": text, "rl.reviews.md": reviews.join("\n") });
+      // calibration D10 adds its own information line to any plan with findings; these cases compare review-loop's alone
+      const c = checkIn(d).get("rl");
+      return { ...c, info: c.info.filter((x) => !x.startsWith(fmtC("findingsLine").split("<")[0])) };
+    };
+    const capP = (c) => c.problems.filter((p) => /^Review \d+ is round/.test(p));
+    const capW = (c) => c.warnings.filter((p) => /^Review \d+ is round/.test(p));
+
+    // review.tag-shapes (D1, A1): every shape of the sample reads as its recorded tag
+    const fx = readFileSync(join(dirname(SELF), "..", "tests", "fixtures", "review-tags.md"), "utf8").split(/\r?\n/).filter((l) => l && !l.startsWith("#"));
+    const wrong = fx.map((l) => l.split("\t")).filter(([t, line]) => findingTag(line) !== t);
+    const human = fx.find((l) => l.includes("no blocking gap"));
+    expect("review.tag-shapes", fx.length === 38 && wrong.length === 0 && Boolean(human?.startsWith("untagged\t")), JSON.stringify({ n: fx.length, wrong }));
+    // review.probe-tokens (D1): a version string and a dotted section number yield no probe; bytes that are not
+    // UTF-8 decode with replacement characters and parse
+    const pt = [...probeTokens("F1 blocking · 7.2 and 14.4, see v0.3.1 and 1.2.3")].sort();
+    const notUtf8 = parseReviews(new TextDecoder("utf-8").decode(Buffer.concat([Buffer.from("## Review 1 · 2026-09-27 · codex\nF1 blocking "), Buffer.from([0xff]), Buffer.from(" 7.2\nVERDICT: REVISE\n")])));
+    expect("review.probe-tokens", JSON.stringify(pt) === JSON.stringify(["14.4", "7.2"]) && notUtf8.length === 1 && notUtf8[0].tags.get("1") === "blocking" && notUtf8[0].probes.get("1").has("7.2"), JSON.stringify(pt));
+
+    // review.round-cap (D2, A2)
+    const four = (o = {}) => [1, 2, 3, 4].map((n) => rv(n, { by: n === 4 ? (o.fourth ?? "codex") : "codex", v: n === (o.readyAt ?? 0) ? "READY" : "REVISE", date: o.date ?? RL }));
+    const note = (text, date = RL) => `- ${date} · note · round cap · ${text}\n`;
+    const draft = { status: "draft", baselined: "none" };
+    const want4 = fmtV("roundCap", { n: 4, r: 4, k: 3 });
+    const five = [...four(), rv(5)];
+    const c = [
+      rl(four(), { fm: draft }),
+      rl(four(), { fm: draft, log: note("after Review 3 · owner: run a fourth round") }),
+      rl(four(), { fm: draft, log: note("after Review 2 · owner: run a fourth round") }),
+      rl(five, { fm: draft, log: note("after Review 3 · owner: two more rounds · through Review 5") }),
+      rl(four(), { fm: draft, log: note("after Review 3 · owner: run a fourth round", "2026-09-26") }),
+      rl(four({ fourth: "human" }), { fm: draft }),
+      rl(four({ readyAt: 3 }), { fm: draft }),
+      rl(four(), { fm: { review: "codex" } }),
+      rl(five, { fm: draft, log: note("after Review 3 · owner: the owner, first") + note("after Review 4 · owner: a different person, second") }),
+      rl(four({ date: "2026-09-26" }), { fm: draft }),
+    ];
+    const none = (x) => capP(x).length + capW(x).length === 0;
+    const capOk = [
+      JSON.stringify(capP(c[0])) === JSON.stringify([want4]),
+      none(c[1]),
+      JSON.stringify(capP(c[2])) === JSON.stringify([want4]),
+      none(c[3]),
+      JSON.stringify(capP(c[4])) === JSON.stringify([want4]),
+      none(c[5]),
+      none(c[6]),
+      capP(c[7]).length === 0 && JSON.stringify(capW(c[7])) === JSON.stringify([want4]),
+      none(c[8]),
+      capP(c[9]).length === 0 && JSON.stringify(capW(c[9])) === JSON.stringify([want4]),
+    ];
+    expect("review.round-cap", capOk.every(Boolean), JSON.stringify([capOk, c.map(capP), c.map(capW)]));
+
+    // review.growth (D3)
+    const st = (b, i) => ` · plan commit abc1234 · plan ${b} B · ${i} items`;
+    const gw = (x) => x.warnings.filter((w) => w.startsWith("review growth:"));
+    const g = [
+      rl([rv(1, { head: st(64600, 12) }), rv(2, { head: st(97000, 14) })]),
+      rl([rv(1, { head: st(64600, 12) }), rv(2, { head: st(96800, 14) })]),
+      rl([rv(1, { head: st(64600, 12) }), rv(2), rv(3), rv(4)]),
+      rl([rv(1, { head: st(64600, 12), v: "READY" }), rv(2, { head: st(97000, 14) })]),
+    ];
+    const wantG = fmtV("growth", { a: 1, x: "63.1", i: 12, b: 2, y: "94.7", j: 14, p: "50.2" });
+    expect("review.growth", JSON.stringify(gw(g[0])) === JSON.stringify([wantG]) && g.slice(1).every((x) => !gw(x).length), JSON.stringify(g.map(gw)));
+
+    // review.stopping-signal (D4): one fixture per reason, the fixed order, and a met signal changes nothing else
+    const sig = (prev, last) => rl([rv(1, { body: prev }), rv(2, { body: last, disp: "- F1 · accepted · applied\n- F2 · accepted · applied" })]);
+    const not = (reason) => fmtV("signalNot", { k: 2, since: "the first review", n: 2, reason });
+    const s = [
+      sig("F1 blocking · 7.2 concurrency", "F1 the rollout is thin"),
+      sig("F1 blocking · 7.2 concurrency", "F1 blocking · the rollout is thin"),
+      sig("F1 blocking · 7.2 concurrency", "F1 blocking · 10.1 is open"),
+      sig("F1 blocking · 7.2 concurrency", "F1 blocking · 7.2 still open"),
+      sig("F1 blocking · 14.3 rollback", "F1 blocking · 14.3 rollback still thin"),
+      sig("F1 blocking · 7.2 concurrency", "F1 advisory · 8.1 wording\nF2 the rollout is thin"),
+      sig("F1 blocking · 7.2 concurrency", "F1 blocking · 8.1 thin\nF2 advisory · 7.2 wording"),
+      sig("F1 blocking · 7.2 concurrency", "F1 blocking · 8.1 thin\nF2 7.2 wording"),
+    ];
+    const sigOk = [
+      JSON.stringify(s[0].info) === JSON.stringify([not(fmtV("reasonUntagged", { f: 1 }))]),
+      JSON.stringify(s[1].info) === JSON.stringify([not(fmtV("reasonNoProbe", { f: 1 }))]),
+      JSON.stringify(s[2].info) === JSON.stringify([not(fmtV("reasonGating", { f: 1, p: "10.1" }))]),
+      JSON.stringify(s[3].info) === JSON.stringify([not(fmtV("reasonReraise", { f: 1, p: "7.2", m: 1 }))]),
+      JSON.stringify(s[4].info) === JSON.stringify([not(fmtV("reasonGating", { f: 1, p: "14.3" }))]),
+      JSON.stringify(s[5].info) === JSON.stringify([not(fmtV("reasonUntagged", { f: 2 }))]),
+      JSON.stringify(s[6].info) === JSON.stringify([fmtV("signalMet", { k: 2, since: "the first review", n: 2 })]),
+      // the met fixture and a not-met twin differ only in the information line
+      JSON.stringify(s[6].problems) === JSON.stringify(s[7].problems) && JSON.stringify(s[6].warnings) === JSON.stringify(s[7].warnings) && s[7].info.length === 1,
+      rl([rv(1)]).info.length === 0 && rl([rv(1), rv(2, { v: "READY" })]).info.length === 0,
+    ];
+    expect("review.stopping-signal", sigOk.every(Boolean), JSON.stringify([sigOk, s.map((x) => x.info)]));
+
+    // review.scope (D10): each gating amendment is owed a READY that names it or is unscoped
+    const am = (l3, l5) => ["7.1", "7.1", l3, "7.1", l5].map((layer, k) => `- A${k + 1} · 2026-09-16 · defect · ~D1 · layer: ${layer} · the code was wrong and the plan right\n`).join("");
+    const sc = (head, o = {}) => rl([rv(1, { v: "READY", date: "2026-09-15" }), rv(2, { v: o.v ?? "READY", date: "2026-09-17", head, body: o.body })], { fm: { review: "codex" }, amend: am("14.3", o.l5 ?? "14.4") });
+    const trig = (x) => x.problems.filter((p) => /^A\d+ \(/.test(p));
+    const ow = (x) => x.warnings.filter((w) => w.includes("outside the scope"));
+    const s0 = sc(""), sA5 = sc(" · scope A5"), sA35 = sc(" · scope A3,A5"), sA9 = sc(" · scope A9");
+    const o1 = sc(" · scope A5", { v: "REVISE", l5: "14.1", body: "F1 blocking · 3.3 retention" });
+    const o2 = sc(" · scope A5", { v: "REVISE", l5: "14.1", body: "F1 blocking · 14.3 rollback" });
+    const o3 = sc(" · scope A5", { v: "REVISE", l5: "14.1", body: "F1 blocking · 14.1 inventory" });
+    const whole = [...scopeProbes(parsePlan("---\nrubric: 2\n---\n## Amendments\n- A1 · 2026-09-16 · defect · ~D1 · layer: 14 · the code was wrong\n"), ["A1"])].sort();
+    const scOk = [
+      trig(s0).length === 0,
+      trig(sA5).length === 1 && trig(sA5)[0].startsWith("A3 (gating probe 14.3)"),
+      trig(sA35).length === 0,
+      sA9.problems.includes(fmtV("scopeUnknown", { n: 2, id: "A9" })),
+      JSON.stringify(ow(o1)) === JSON.stringify([fmtV("scopeOutside", { n: 2, ids: "A5", f: 1, probes: "3.3" })]),
+      ow(o2).length === 1 && ow(o3).length === 0,
+      JSON.stringify(whole) === JSON.stringify(["14.1", "14.2", "14.3", "14.4"]),
+    ];
+    expect("review.scope", scOk.every(Boolean), JSON.stringify([scOk, trig(s0), trig(sA5), sA9.problems, ow(o1), ow(o2), whole]));
+  }
+
+  // review-loop D5–D9, D14, D15: the prompt builder. Every case writes under its own fixture root: the child
+  // process gets TMP, TEMP and TMPDIR pointing there, and in-process calls pass the folder explicitly.
+  {
+    const sum2 = RUBRIC[2].counts.reduce((x, y) => x + y, 0);
+    const tot2 = `15/15 layers · ${sum2}/${sum2} probes`;
+    const CL = "- [ ] D1 · Export downloads as CSV · test: export.test.ts (fails when: the export is empty)\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors (fails when: an unused import is added)";
+    const pp = (slug, o = {}) => plan(slug, { items: CL, baseline: CL, fm: { rubric: "2", review: "pending", coverage_author: tot2, coverage_reviewer: tot2 }, coverage: { rubric: 2, all: true }, ...o }) + (o.tail ?? "\n## Report\nREPORT-MARKER\n");
+    const rv = (n, o = {}) => `## Review ${n} · 2026-09-15 · codex\n${o.body ?? "F1 blocking · 7.2 thin"}\n${tot2}\nVERDICT: ${o.v ?? "READY"}\n### Dispositions\n${o.disp ?? "- F1 · accepted · applied"}\n`;
+    const tmpOf = (d) => { const t = join(d, "tmp"); mkdirSync(t, { recursive: true }); return t; };
+    const noGit = gitReader({ run: () => ({ status: 128, stderr: "fatal: not a git repository", stdout: "" }) });
+    const quiet = (d) => ({ git: noGit, tmp: tmpOf(d), env: {} });
+    const refs = join(dirname(SELF), "..", "references");
+    const layersText = readFileSync(join(refs, "layers.md"), "utf8");
+    const rubricFirst = rubricBlock(readFileSync(join(refs, "review.md"), "utf8")).split("\n")[0];
+    const tmpFiles = (t) => readdirSync(t).filter((f) => f.startsWith("dod-review-"));
+
+    // review-prompt.build (D5): a child process with the temporary folder moved into the fixture
+    {
+      const d = store({ "pb.md": pp("pb"), "pb.reviews.md": rv(1) });
+      const t = tmpOf(d);
+      const r = node([SELF, "--review-prompt", "pb", "--reviewer", "human", "--dir", d], { env: { ...process.env, TMP: t, TEMP: t, TMPDIR: t } });
+      const p = loadPlans(d).find((x) => x.slug === "pb");
+      const name = `dod-review-${storeHash(d)}-${p.fm.id}-${localDate()}.txt`;
+      const file = join(t, name);
+      const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+      const heading = (r.stdout.match(/^heading: (.*)$/m) ?? [])[1] ?? "";
+      const hf = headFields(heading);
+      const rows = text.split("\n").filter((l) => /^\| \d+ \| [^|]+ \|  \|  \| /.test(l));
+      const ok = [
+        r.status === 0, text.startsWith(rubricFirst), text.includes(layersText), rows.length === 15,
+        !/coverage_author/.test(text), !text.includes("REPORT-MARKER"), RE.reviewHead.test(heading),
+        hf.stamp?.bytes === statSync(p.file).size, hf.stamp?.items === 2, hf.prompt === sha256(readFileSync(file)).slice(0, 12),
+      ];
+      // a plan missing a Coverage row is refused and writes nothing
+      const d2 = store({ "pc.md": pp("pc").replace(/^\| 15 \|.*\n/m, "") });
+      const t2 = tmpOf(d2);
+      const r2 = reviewPrompt(d2, loadPlans(d2), { slug: "pc", reviewer: "human" }, { git: noGit, tmp: t2, env: {} });
+      // the read-back finds other bytes: no heading
+      const d3 = store({ "pd.md": pp("pd") });
+      const r3 = reviewPrompt(d3, loadPlans(d3), { slug: "pd", reviewer: "human" }, { ...quiet(d3), readBack: () => Buffer.from("other bytes") });
+      ok.push(r2.code === 1 && tmpFiles(t2).length === 0, r3.code === 1 && /was replaced by another run — build again/.test(r3.lines.join("\n")) && !r3.lines.some((l) => l.startsWith("heading:")));
+      expect("review-prompt.build", ok.every(Boolean), JSON.stringify([ok, r.stderr, r2.lines, r3.lines]));
+    }
+
+    // review-prompt.redaction (D6): prior reviews, the audience profile, a secret in the environment, home paths
+    {
+      const secret = "S3cr3tValue".padEnd(24, "x");
+      const root = join(tmp, "rp-red", "Users", "dodhome", "repo");
+      mkdirSync(root, { recursive: true });
+      const d = join(root, "docs", "dod");
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "pr.md"), pp("pr", { log: `the ## Report heading is written at close\nthe value ${secret} was pasted here\n` }));
+      writeFileSync(join(d, "pr.reviews.md"), rv(1, { body: "F1 blocking · 7.2 PRIOR-REVIEW-MARKER" }));
+      writeFileSync(join(d, "profile.md"), "# Profile\n\n## Audience\n- who · AUDIENCE-MARKER\n");
+      const t = join(tmp, "rp-red", "home", "dodhome", "tmp");
+      mkdirSync(t, { recursive: true });
+      const r = reviewPrompt(d, loadPlans(d), { slug: "pr", reviewer: "human" }, { git: noGit, tmp: t, env: { DOD_TEST_SECRET: secret } });
+      const all = `${r.text ?? ""}\n${r.lines.join("\n")}`;
+      const bad = ["PRIOR-REVIEW-MARKER", "AUDIENCE-MARKER", secret, "dodhome"].filter((x) => all.includes(x));
+      expect("review-prompt.redaction", r.code === 0 && !bad.length && (r.text ?? "").includes("the ## Report heading is written at close"), JSON.stringify([bad, r.lines]));
+    }
+
+    // review-prompt.later-round (D7)
+    {
+      const build = (reviews) => { const d = store({ "pl.md": pp("pl"), ...(reviews ? { "pl.reviews.md": reviews } : {}) }); return reviewPrompt(d, loadPlans(d), { slug: "pl", reviewer: "human" }, quiet(d)); };
+      const six = rv(1, { v: "REVISE", body: ["F1 blocking · 7.2 a", "F2 advisory · b", "F3 advisory · c", "F4 advisory · d", "F5 advisory · e", "F6 advisory · f"].join("\n"), disp: [1, 2, 3, 4, 5, 6].map((f) => `- F${f} · accepted · applied`).join("\n") });
+      const first = build(null), later = build(six), ready = build(rv(1));
+      const paras = (later.text ?? "").split("\n\n");
+      const planAt = paras.findIndex((x) => x.startsWith("The plan:"));
+      const ok = [
+        first.code === 0 && !/This is a revised plan|EARLIER:/.test(first.text),
+        later.code === 0 && later.text.startsWith("This is a revised plan; your earlier findings were F1–F6.") && /EARLIER: all resolved/.test(paras[planAt - 1] ?? ""),
+        ready.code === 0 && !/This is a revised plan|EARLIER:/.test(ready.text),
+      ];
+      expect("review-prompt.later-round", ok.every(Boolean), JSON.stringify(ok));
+    }
+
+    // review-prompt.files (D8): the pure selection over a fixture tree and a synthetic status list
+    {
+      const root = join(tmp, "rp-files");
+      const st = join(root, "docs", "dod");
+      mkdirSync(st, { recursive: true });
+      const put = (p, b) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), b); };
+      put("docs/dod/plan.md", "x"); put("src/ok.js", "ok\n"); put("src/new.js", "n\n"); put("src/ign.log", "i\n"); put(".env.local", "E=1\n");
+      put("src/bin.dat", Buffer.from([1, 0, 2])); put("src/latin.txt", Buffer.from([0x63, 0x61, 0x66, 0xe9]));
+      put("src/key.js", `const k = "${"gh" + "p_" + "a".repeat(36)}";\n`);
+      put("src/budget.txt", "b".repeat(10)); put("src/next.txt", "c");
+      const status = new Map([["src/new.js", "??"], ["src/ign.log", "!!"]]);
+      const fsx = { ...realFs, lstat: (p) => (p.endsWith("link.js") ? { isSymbolicLink: () => true, isFile: () => false } : lstatSync(p)) };
+      const sel = selectFiles({ citations: ["src/ok.js", "src/gone.js", "src/link.js", "../outside.txt", "src/new.js", "src/ign.log", "docs/dod/plan.md", ".env.local", "src/bin.dat", "src/latin.txt", "src/key.js", "src/budget.txt", "src/next.txt", "--output=x", "a;b", "$(whoami)"], root, store: st, status, fsx, budget: 3 + 10 });
+      put("../outside.txt", "o\n");
+      const why = Object.fromEntries(sel.excluded.map((e) => [e.path, e.reason]));
+      const ok = [
+        JSON.stringify(sel.included.map((f) => f.path)) === JSON.stringify(["src/ok.js", "src/budget.txt"]),
+        why["src/gone.js"] === "not found", why["src/link.js"] === "a link", why["src/new.js"] === "untracked", why["src/ign.log"] === "ignored",
+        why["docs/dod/plan.md"] === "in the plan store", why[".env.local"] === "refused name", why["src/bin.dat"] === "binary",
+        why["src/latin.txt"] === "not UTF-8", why["src/key.js"] === "token-shaped content at line 1", why["src/next.txt"] === "over budget (1 B, 0 B left)",
+        ["--output=x", "a;b", "$(whoami)"].every((c) => why[c] === "not found"),
+      ];
+      // outside the repository: a real file one level above the root
+      const out = selectFiles({ citations: ["../outside.txt"], root, store: st, status, fsx });
+      ok.push(out.excluded[0]?.reason === "outside the repository");
+      // 230 citations: 200 considered, 20 cap lines and one count line
+      const many = Array.from({ length: 230 }, (_, k) => `src/m${k}.js`);
+      const capLines = exclusionLines(selectFiles({ citations: many, root, store: st, status, fsx }).excluded).filter((l) => l.includes("200-citation cap"));
+      ok.push(capLines.length === 21 && capLines.at(-1) === "… and 10 more: over the 200-citation cap");
+      // a plan in a repository that cites nothing
+      const d = store({ "pn.md": pp("pn") });
+      const fakeGit = gitReader({ run: (cmd, argv) => ({ status: 0, stdout: argv.includes("--show-toplevel") ? d : argv.includes("HEAD") ? "abc1234" : "" }) });
+      const none = reviewPrompt(d, loadPlans(d), { slug: "pn", reviewer: "human" }, { git: fakeGit, tmp: tmpOf(d), env: {} });
+      ok.push(none.code === 0 && none.text.includes("no code files: the plan cites none") && !/^=== /m.test(none.text));
+      expect("review-prompt.files", ok.every(Boolean), JSON.stringify([ok, why, capLines.slice(-2)]));
+    }
+
+    // review-prompt.git-status (D8): names with spaces, quotes and a newline, and a rename
+    {
+      const m = parseStatusZ(`?? a b.txt\0!! "q".txt\0?? line\nbreak.txt\0R  new name.js\0old name.js\0 M src/x.js\0`);
+      expect("review-prompt.git-status", m.get("a b.txt") === "??" && m.get('"q".txt') === "!!" && m.get("line\nbreak.txt") === "??" && m.get("new name.js") === "R " && !m.has("old name.js") && m.get("src/x.js") === " M" && parseStatusZ("garbage") === null && parseStatusZ("").size === 0, JSON.stringify([...m]));
+    }
+
+    // review-prompt.no-git (D8): a real git in a fixture folder outside any repository
+    {
+      const d = store({ "pg.md": pp("pg", { log: "Cites `src/app.js`.\n" }) });
+      const r = reviewPrompt(d, loadPlans(d), { slug: "pg", reviewer: "human" }, { tmp: tmpOf(d), env: {} });
+      expect("review-prompt.no-git", r.code === 0 && /no code files: /.test(r.text) && !/^=== /m.test(r.text), JSON.stringify(r.lines));
+    }
+
+    // review-prompt.live (D8): this plan's own prompt, built in the lab, carries dod-index.mjs at its current hash
+    {
+      const labStore = join(dirname(SELF), "..", "..", "..", "docs", "dod");
+      if (!existsSync(join(labStore, "review-loop.md"))) console.log("review-prompt.live: skipped — docs/dod/review-loop.md is not beside the skill");
+      else {
+        const t = join(tmp, "rp-live");
+        mkdirSync(t, { recursive: true });
+        const r = reviewPrompt(labStore, loadPlans(labStore), { slug: "review-loop", reviewer: "human" }, { tmp: t, env: {} });
+        const want = `included skills/dod/scripts/dod-index.mjs · sha256 ${sha256(readFileSync(SELF)).slice(0, 12)} ·`;
+        expect("review-prompt.live", r.code === 0 && r.lines.some((l) => l.startsWith(`  ${want}`)), JSON.stringify(r.lines.slice(0, 6)));
+      }
+    }
+
+    // review-prompt.spawns (D9): one spawn site, three argument shapes, hostile citations inert
+    {
+      const src = readFileSync(SELF, "utf8");
+      const outside = src.slice(0, src.indexOf("// ---------------------------------------------------------------- selftest")) + src.slice(src.lastIndexOf("// ---------------------------------------------------------------- cli"));
+      const calls = [...outside.matchAll(/\bspawn(?:Sync)?\s*\(/g)].length;
+      const helper = outside.slice(outside.indexOf("export function gitReader"), outside.indexOf("// `git status --porcelain=v1 -z`"));
+      const shapes = ['["rev-parse", "--show-toplevel"]', '["rev-parse", "--short", "HEAD"]', '["status", "--porcelain=v1", "--ignored", "-z", "--",'];
+      const ok = [calls === 0, (outside.match(/run = spawnSync/g) ?? []).length === 1 && helper.includes("run = spawnSync"), /run\("git", \["-C", cwd, \.\.\.argv\], \{ shell: false, timeout: left, windowsHide: true/.test(helper), helper.includes('GIT_OPTIONAL_LOCKS: "0"'),
+        shapes.every((s) => outside.includes(s)), !/run\(\s*["'](?:codex|claude)/.test(outside), /`:\(literal\)\$\{c\}`/.test(outside)];
+      expect("review-prompt.spawns", ok.every(Boolean), JSON.stringify(ok));
+    }
+
+    // review-prompt.git-failures (D9): a substituted runner — timeout, exit 128, garbage, and the shared deadline
+    {
+      const d = store({ "pf.md": pp("pf", { log: "Cites `src/app.js` and `src/b.js`.\n" }) });
+      mkdirSync(join(d, "src"));
+      writeFileSync(join(d, "src", "app.js"), "a\n"); writeFileSync(join(d, "src", "b.js"), "b\n");
+      const via = (run) => reviewPrompt(d, loadPlans(d), { slug: "pf", reviewer: "human" }, { git: gitReader({ run }), tmp: tmpOf(d), env: {} });
+      const t1 = via(() => ({ error: { code: "ETIMEDOUT" } }));
+      const t2 = via(() => ({ status: 128, stderr: "fatal: bad object", stdout: "" }));
+      const t3 = via((cmd, argv) => ({ status: 0, stdout: argv.includes("--show-toplevel") ? d : argv.includes("HEAD") ? "abc1234" : "garbage" }));
+      let now = 0;
+      const seen = [];
+      const g7 = gitReader({ clock: () => now, run: (cmd, argv, o) => { seen.push(o.timeout); now += 7000; return { status: 0, stdout: "x" }; } });
+      g7(".", ["rev-parse", "--show-toplevel"]); g7(".", ["rev-parse", "--short", "HEAD"]);
+      let now2 = 0, calls10 = 0;
+      const g10 = gitReader({ clock: () => now2, run: () => { calls10++; now2 += 10_000; return { status: 0, stdout: "x" }; } });
+      g10(".", ["rev-parse", "--show-toplevel"]); const second = g10(".", ["rev-parse", "--short", "HEAD"]);
+      const ok = [
+        t1.code === 0 && t1.text.includes("no code files: git timed out after 10 s"),
+        t2.code === 0 && t2.text.includes("no code files: git exited 128"),
+        t3.code === 0 && !/^=== /m.test(t3.text) && (t3.text.match(/— untracked/g) ?? []).length === 2,
+        seen.length === 2 && seen[0] === 10_000 && seen[1] <= 3000,
+        calls10 === 1 && second.fail === "git timed out after 10 s",
+      ];
+      expect("review-prompt.git-failures", ok.every(Boolean), JSON.stringify([ok, seen, t3.lines]));
+    }
+
+    // review-prompt.sweep (D14): only this store's stale prompt files go
+    {
+      const d = store({ "ps.md": pp("ps") });
+      const t = tmpOf(d);
+      const id = loadPlans(d)[0].fm.id, h = storeHash(d);
+      const mk = (name, hours) => { const p = join(t, name); writeFileSync(p, "x"); const s = (Date.now() - hours * 3600_000) / 1000; utimesSync(p, s, s); return name; };
+      const stale = mk(`dod-review-${h}-${id}-2026-09-01.txt`, 25);
+      const fresh = mk(`dod-review-${h}-${id}-2026-09-02.txt`, 23);
+      const other = mk(`dod-review-${"0".repeat(12)}-${id}-2026-09-01.txt`, 25);
+      const noPlan = mk(`dod-review-${h}-dod-20260101-zzzz-2026-09-01.txt`, 25);
+      const unrelated = mk("unrelated.txt", 25);
+      const r = reviewPrompt(d, loadPlans(d), { slug: "ps", reviewer: "human" }, { git: noGit, tmp: t, env: {} });
+      const left = readdirSync(t);
+      expect("review-prompt.sweep", r.code === 0 && !left.includes(stale) && [fresh, other, noPlan, unrelated].every((f) => left.includes(f)), JSON.stringify(left));
+    }
+
+    // review-prompt.control-chars (D15): a citation carrying ESC and CR, and a finding line carrying ESC
+    {
+      const d = store({ "pk.md": pp("pk", { log: "Cites `src/\u001b[2Kbad\rname.js`.\n" }), "pk.reviews.md": rv(1, { v: "REVISE", body: "F1 \u001b[31mblocking · 7.2 thin" }) + rv(2, { v: "REVISE", body: "F1 blocking · 8.1 thin" }) });
+      const fakeGit = gitReader({ run: (cmd, argv) => ({ status: 0, stdout: argv.includes("--show-toplevel") ? d : argv.includes("HEAD") ? "abc1234" : "" }) });
+      const out = [];
+      const { log, error } = console;
+      console.log = (...a) => out.push(a.join(" ")); console.error = (...a) => out.push(a.join(" "));
+      try {
+        const r = reviewPrompt(d, loadPlans(d), { slug: "pk", reviewer: "human" }, { git: fakeGit, tmp: tmpOf(d), env: {} });
+        for (const l of r.lines) console.log(cleanLine(redactEnv(l).text));
+        main(["node", SELF, "--check", "pk", "--dir", d]);
+      } finally { console.log = log; console.error = error; }
+      const badChars = out.join("\n").split("\n").filter((l) => /[\u0000-\u001f\u007f-\u009f]/.test(l));
+      expect("review-prompt.control-chars", out.some((l) => l.includes("left out src/[2Kbad name.js — not found")) && !badChars.length, JSON.stringify([out.slice(0, 5), badChars]));
+    }
+  }
+
+  // review-docs (review-loop D12): the three documents teach the command, the note, the fields, the signal and
+  // the scope, keep the reviewer fallback, drop the old temp path, and SKILL.md stays under 500 lines
+  {
+    const at = (f) => { const p = join(dirname(SELF), "..", f); return existsSync(p) ? readFileSync(p, "utf8").replace(/\r\n/g, "\n") : ""; };
+    const rev = at("references/review.md"), life = at("references/lifecycle.md"), skill = at("SKILL.md");
+    const inRev = ["--review-prompt <slug>", "note · round cap · after Review", "· plan <bytes> B · <n> items", "stopping signal met at Review", "--scope A", "· prompt <12 hex>",
+      "recompute the prompt file's hash", "rebuild the prompt from the current plan", "If none of the three happens", "Never accept a verdict produced without reading"];
+    const missing = [...inRev.filter((x) => !rev.includes(x)).map((x) => `review.md: ${x}`), ...(life.includes("--scope") ? [] : ["lifecycle.md: --scope"]),
+      ...["--review-prompt", "round cap"].filter((x) => !skill.includes(x)).map((x) => `SKILL.md: ${x}`)];
+    const lines = skill.split("\n").length;
+    expect("review-docs", !missing.length && !rev.includes("/tmp/dod-review-<slug>.txt") && lines > 1 && lines < 500, JSON.stringify({ missing, lines }));
+  }
+
+  // calibration D1, D2, D24, D27: dry-run notes — grammar, the rule at approval, privacy, cleaned echoes
+  {
+    const ON = "2026-10-02", OFF = "2026-10-01"; // the fixture dates either side of CALIBRATION_FROM (A4)
+    const note = (text, date = "2026-09-14") => `- ${date} · note · dry-run · ${text}\n`;
+    const READY = "- 2026-09-15 · status → ready · approve · review: codex\n- 2026-09-15 · status → in-progress · start\n";
+    const cal = (o = {}) => checkIn(store(withReviews({ "c.md": (o.draft ? (x) => x.replace(READY, "").replace("\nstatus: in-progress\n", "\nstatus: draft\n") : (x) => x)(plan("c", { ...o, fm: { baselined: ON, ...(o.draft ? { baselined: "none" } : {}), ...(o.fm ?? {}) } })) }))).get("c");
+    const calP = (c) => c.problems.filter((p) => Object.keys(MESSAGES_CALIBRATION).some((k) => p.startsWith(fmtC(k).split("<")[0])));
+    const calW = (c) => c.warnings.filter((p) => Object.keys(MESSAGES_CALIBRATION).some((k) => p.startsWith(fmtC(k).split("<")[0])));
+    const ok2 = note("D1 · test: `node t.js` → 3 passing") + note("D2 · cmd: `npm run lint` → 0 errors");
+
+    // calib.dry-run-grammar (D1): each bad shape reported once, a good note silent, an arrow inside the span kept
+    {
+      const bad = [
+        "D99 · test: `x` → y", "D1 · cmd: `x` → y", "D1 · n/a · too short",
+        "D1 · test: `x` y", "D1 · test: x → y",
+      ];
+      const arrow = "D2 · cmd: `a → b` → printed";
+      const c = cal({ preReady: ok2, log: bad.map((b) => note(b, "2026-10-03")).join("") + note(arrow, "2026-10-03") + note("D1 · n/a · the fixture has no runner yet", "2026-10-03") });
+      const want = [fmtC("dryRunUnknown", { id: "D99" }), fmtC("dryRunType", { id: "D1", type: "cmd", itemType: "test" }), fmtC("dryRunNaShort", { id: "D1" }),
+        fmtC("dryRunMalformed", { text: "dry-run · D1 · test: `x` y" }), fmtC("dryRunMalformed", { text: "dry-run · D1 · test: x → y" })];
+      const got = calP(c);
+      const p = parsePlan(plan("c", { fm: { baselined: ON }, log: note(arrow, "2026-10-03") }), "c.md").dryRuns[0];
+      // a dry-run note never verifies: an item checked with only its note is "checked without evidence"
+      const v = cal({ preReady: ok2, items: "- [x] D1 · Export downloads as CSV · test: export.test.ts\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors" });
+      // before CALIBRATION_FROM the same notes are plain notes (A4)
+      const off = cal({ fm: { baselined: OFF }, log: bad.map((b) => note(b)).join("") });
+      expect("calib.dry-run-grammar", JSON.stringify([...got].sort()) === JSON.stringify([...want].sort()) && p?.command === "a → b" && p?.printed === "printed"
+        && v.verified === 0 && v.problems.some((x) => x.startsWith("D1 is checked without evidence")) && calP(off).length === 0, JSON.stringify({ got, p, v: v.verified, off: calP(off) }));
+    }
+
+    // calib.dry-run-at-ready (D2): before the ready line and on or before baselined; the date gate; amendments and
+    // file items never asked; a backlog plan's early pass counts
+    {
+      const miss = (c) => calP(c).filter((x) => x.includes("has no dry-run note before approval")).map((x) => x.split(" ")[0]).join(",");
+      const amended = "- [ ] D1 · Export downloads as CSV · test: export.test.ts\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors\n- [ ] D3 · New check · test: t3.js";
+      const r = [
+        miss(cal({})) === "D1,D2",
+        miss(cal({ preReady: ok2 })) === "",
+        miss(cal({ log: ok2 })) === "D1,D2",
+        miss(cal({ preReady: ok2.replace(/2026-09-14/g, "2026-10-03") })) === "D1,D2",
+        miss(cal({ fm: { baselined: OFF } })) === "",
+        miss(cal({ preReady: ok2, items: amended, baseline: amended.split("\n").slice(0, 2).join("\n"), amend: "- A1 · 2026-10-03 · requested · +D3 · layer: — · owner asked for a third check\n", log: "- 2026-10-03 · version · v2 · D3 added\n" })) === "",
+        miss(cal({ preReady: note("D2 · cmd: `npm run lint` → 0 errors"), items: "- [ ] D1 · Export file exists · file: out.csv\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors", baseline: "- [ ] D1 · Export file exists · file: out.csv\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors" })) === "",
+        miss(cal({ fm: { kind: "backlog" }, preReady: "- 2026-09-14 · D1 · pass · test: export.test.ts (ok) · abc1234 · claude\n" + note("D2 · cmd: `npm run lint` → 0 errors") })) === "",
+      ];
+      expect("calib.dry-run-at-ready", r.every(Boolean), JSON.stringify(r));
+    }
+
+    // calib.dry-run-privacy (D24): a warning in draft, a problem once ready; placeholders are never reported
+    {
+      // spelled in parts so this shipped source never carries the shapes release-check's privacy scan looks for
+      const who = "some" + "one";
+      const leak = note(`D1 · test: ` + "`node t.js`" + ` → wrote C:\\Users\\${who}\\x`) + note(`D2 · cmd: ` + "`x`" + ` → c:/users/${who}/x`) + note("D1 · n/a · it mailed a" + "@b.co a report");
+      const safe = note("D1 · test: `node t.js` → wrote <tmp>/x") + note("D2 · cmd: `x` → read <home>/x");
+      const priv = (x) => x.filter((p) => p.includes("carries a home path or an e-mail")).length;
+      const d = cal({ draft: true, preReady: leak }), rd = cal({ preReady: ok2, log: leak }), s = cal({ preReady: ok2 + safe });
+      expect("calib.dry-run-privacy", priv(d.warnings) === 3 && priv(d.problems) === 0 && priv(rd.problems) === 3 && priv(rd.warnings) === 0 && priv(s.problems) + priv(s.warnings) === 0,
+        JSON.stringify({ d: [priv(d.warnings), priv(d.problems)], rd: [priv(rd.problems), priv(rd.warnings)], s: priv(s.problems) }));
+    }
+
+    // calib.echo (D27): controls removed, long text cut at 120 characters with "…"
+    {
+      const c = cal({ preReady: ok2, log: note("D1 · test: `x` \u001b[2Jcleared\r" + "y".repeat(500)) });
+      const echoed = calP(c).filter((x) => x.startsWith("dry-run note does not match"));
+      const tail = echoed[0]?.slice(fmtC("dryRunMalformed").indexOf("<text>")) ?? "";
+      expect("calib.echo", echoed.length === 1 && !/[\u0000-\u001f\u007f-\u009f]/.test(echoed[0]) && tail.endsWith("…") && Array.from(tail).length === 121 && echoText("a\u001b[31mb\u0085c") === "abc",
+        JSON.stringify({ echoed, n: Array.from(tail).length }));
+    }
+  }
+
+  // calibration D3, D4, D5, D26, D29: the store's miss history
+  {
+    const ON = "2026-10-02";
+    const am = (n, kind, layer) => `- A${n} · 2026-09-16 · ${kind} · ~D1 · layer: ${layer} · why it changed\n`;
+    const done = (slug, amend) => plan(slug, { fm: { status: "done" }, amend });
+    const PROFILE = "# profile\n\n## Project probes\n- 3.1 · state the shape of the text\n  a continuation line\n\n## Audience\n- default · working\n";
+    // three done plans: 7.2 in two, 5.2 in one, a bare layer 7 in two; 6.1 only in an open plan
+    const hist = () => ({ "d1.md": done("d1", am(1, "discovered", "7.2") + am(2, "discovered", "7") + am(3, "discovered", "5.2")), "d2.md": done("d2", am(1, "corrected", "7.2") + am(2, "discovered", "7") + am(3, "requested", "6.1")), "d3.md": done("d3", ""), "o1.md": plan("o1", { amend: am(1, "discovered", "6.1") + am(2, "discovered", "6.1") }) });
+    const keys = (plans) => [...storeMeta(plans).history.keys()].sort().join(",");
+    const mem = { DOD_TEST_BETWEEN_READS: calibSeams.DOD_TEST_BETWEEN_READS, readFileSync: calibSeams.readFileSync };
+    const restore = () => Object.assign(calibSeams, mem);
+
+    // calib.miss-history (D3, D5): {3.1, 7.2}; no section is valid; the --check line, and "none yet" on an empty store
+    {
+      const a = loadStore(store({ ...hist(), "profile.md": PROFILE }));
+      const b = loadStore(store({ ...hist(), "profile.md": "# profile\n\n## Audience\n- default · working\n" }));
+      const e = loadStore(store({ "o1.md": plan("o1") }));
+      const line = historyLine(a.find((p) => p.slug === "o1"), a);
+      const out = cli(store({ ...hist(), "profile.md": PROFILE }), "--check", "o1").out;
+      const r = [keys(a) === "3.1,7.2", keys(b) === "7.2", storeMeta(b).faults.length === 0, line.endsWith("miss history: 7.2 in 2 of 3 done plans · 3.1 profile"),
+        historyLine(e[0], e).endsWith("miss history: none yet (0 done plans)"), (() => { const ls = out.split("\n"); let k = ls.findIndex((l) => l.startsWith("  baseline ")) + 1; while (ls[k]?.startsWith("      · ")) k++; return ls[k]?.includes("miss history: 7.2 in 2 of 3"); })()];
+      expect("calib.miss-history", r.every(Boolean), JSON.stringify({ r, a: keys(a), b: keys(b), line }));
+    }
+
+    // calib.depth (D4): a history probe mapped to D1 D2 with only n/a notes is reported; one cmd note on D2 clears it;
+    // a probe answered by prose is not asked; a profile probe gets its own text
+    {
+      const na = `- 2026-09-14 · note · dry-run · D1 · n/a · the runner is not written yet\n- 2026-09-14 · note · dry-run · D2 · n/a · the lint config lands in step 2\n`;
+      const cmd2 = `- 2026-09-14 · note · dry-run · D1 · n/a · the runner is not written yet\n- 2026-09-14 · note · dry-run · D2 · cmd: \`npm run lint\` → 0 errors\n`;
+      const row7 = (p72) => ({ rubric: 2, rows: { 7: { pointer: `${LAYERS[6]} › 7.1 D1; ${p72}; 7.3 D1` } } });
+      const depth = (preReady, p72, profile = "# profile\n") => {
+        const plans = loadStore(store(withReviews({ ...hist(), "c.md": plan("c", { fm: { baselined: ON, rubric: "2" }, coverage: row7(p72), preReady }), "profile.md": profile })));
+        return checkPlan(plans.find((p) => p.slug === "c"), plans).problems.filter((x) => x.startsWith("probe "));
+      };
+      const bad = depth(na, "7.2 D1 D2"), good = depth(cmd2, "7.2 D1 D2"), prose = depth(na, "7.2 prose: answered by the States section text");
+      const prof = depth(na, "7.2 prose: answered by the States section text", "## Project probes\n- 7.1 · a project probe\n");
+      const r = [bad.length === 1 && bad[0] === fmtC("depthMissing", { p: "7.2", k: 2, n: 3, ids: "D1 D2" }), good.length === 0, prose.length === 0,
+        prof.length === 1 && prof[0] === fmtC("depthMissingProfile", { p: "7.1", ids: "D1" })];
+      expect("calib.depth", r.every(Boolean), JSON.stringify({ r, bad, good, prose, prof }));
+    }
+
+    // calib.faults (D26): each fault completes, warns once naming the file, keeps the rest, and the line says incomplete
+    {
+      const run = (files, prep = () => {}) => {
+        const d = store(files); prep(d);
+        try { const plans = loadStore(d); const m = storeMeta(plans); return { faults: m.faults, keys: keys(plans), line: historyLine(plans[0], plans) }; }
+        catch (e) { return { threw: String(e) }; } finally { restore(); }
+      };
+      const base = () => ({ ...hist(), "profile.md": PROFILE });
+      const noProfile = () => { const h = base(); delete h["profile.md"]; return h; };
+      const cases = {
+        directory: run(noProfile(), (d) => mkdirSync(join(d, "profile.md"))),
+        unreadable: run(base(), () => { calibSeams.readFileSync = (p) => { if (p.endsWith("profile.md")) { const e = new Error("EACCES"); e.code = "EACCES"; throw e; } return mem.readFileSync(p); }; }),
+        notUtf8: run(noProfile(), (d) => writeFileSync(join(d, "profile.md"), Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0a]))),
+        badRow: run({ ...base(), "profile.md": PROFILE + "\n## Project probes\n- 99.1 · no such probe\n" }),
+        planBroken: run({ ...base(), "d4.md": done("d4", am(1, "discovered", "4.4")).replace("\nstatus: done\n", "\nstatus: done\nnot a field\n") }),
+        reviewsBroken: run(base(), (d) => { rmSync(join(d, "d1.reviews.md"), { force: true }); mkdirSync(join(d, "d1.reviews.md")); }),
+      };
+      const want = { directory: [fmtC("profileUnreadable", { code: "EISDIR" }), "7.2"], unreadable: [fmtC("profileUnreadable", { code: "EACCES" }), "7.2"], notUtf8: [fmtC("profileUnreadable", { code: "not UTF-8" }), "7.2"],
+        badRow: [fmtC("profileRow", { text: "- 99.1 · no such probe" }), "3.1,7.2"], planBroken: [fmtC("planSkipped", { name: "d4" }), "3.1,7.2"], reviewsBroken: [fmtC("planSkipped", { name: "d1.reviews.md" }), "3.1,7.2"] };
+      const bad = Object.entries(cases).filter(([k, c]) => c.threw || c.faults.length !== 1 || c.faults[0] !== want[k][0] || c.keys !== want[k][1] || !c.line.endsWith(fmtC("historyPartial", { k: 1 }))).map(([k]) => k);
+      const out = cli(store(noProfile()), "--check", "d1");
+      const d = store(noProfile()); mkdirSync(join(d, "profile.md"));
+      const cliOut = cli(d, "--check", "d1").out;
+      expect("calib.faults", bad.length === 0 && cliOut.includes(`warn: ${fmtC("profileUnreadable", { code: "EISDIR" })}`) && cliOut.includes("incomplete:") && !out.out.includes("incomplete:"), JSON.stringify({ bad, cases }));
+    }
+
+    // calib.snapshot (D29): a same-size rewrite with the old mtime is seen and the store read again; a store changing
+    // on both reads warns; an unchanged store is read once
+    {
+      const d = store({ ...hist(), "profile.md": PROFILE }), pf = join(d, "profile.md");
+      let calls = 0;
+      const flip = (once) => () => { calls++; if (once && calls > 1) return; const st = statSync(pf); const cur = readFileSync(pf, "utf8"); writeFileSync(pf, cur.includes("- 3.1 ·") ? cur.replace("- 3.1 ·", "- 3.2 ·") : cur.replace("- 3.2 ·", "- 3.1 ·")); utimesSync(pf, st.atime, st.mtime); };
+      let once, twice, still;
+      try {
+        calibSeams.DOD_TEST_BETWEEN_READS = flip(true); const p1 = loadStore(d); once = { ...storeMeta(p1), keys: keys(p1), size: statSync(pf).size === Buffer.byteLength(PROFILE) };
+        calls = 0; calibSeams.DOD_TEST_BETWEEN_READS = flip(false); const p2 = loadStore(d); twice = storeMeta(p2);
+        restore(); const p3 = loadStore(d); still = storeMeta(p3);
+      } finally { restore(); }
+      expect("calib.snapshot", once.reads === 2 && once.faults.length === 0 && once.keys === "3.2,7.2" && once.size && twice.reads === 2 && twice.faults.includes(fmtC("storeChanged")) && still.reads === 1 && still.faults.length === 0,
+        JSON.stringify({ once: [once.reads, once.faults, once.keys], twice: [twice.reads, twice.faults], still: still.reads }));
+    }
+
+    // calib.index (D8): the history in probe order; rework over done plans only; "none yet" with no done plan
+    {
+      const rw = "- A2 · 2026-09-16 · discovered · ~D1 · layer: 4.4 · reworks: A1 · the first fix was wrong\n";
+      const lines = (files) => { const d = store(files); const plans = loadStore(d); return renderIndex(plans, d).split("\n").filter((l) => /^(Miss history|Rework) — /.test(l)); };
+      const a = lines({ ...hist(), "profile.md": PROFILE });
+      const b = lines({ "d5.md": done("d5", am(1, "discovered", "4.4") + rw), "o2.md": plan("o2", { amend: am(1, "discovered", "4.4") + rw }) });
+      const e = lines({ "o1.md": plan("o1", { amend: am(1, "discovered", "4.4") + rw }) });
+      const want = [fmtC("indexHistory", { list: "3.1 (profile) · 7.2 (2 of 3)" }), fmtC("indexRework", { r: 0, m: 5 })];
+      const wantB = [fmtC("indexNone", { label: "Miss history" }), fmtC("indexRework", { r: 1, m: 2 })];
+      const wantE = [fmtC("indexNone", { label: "Miss history" }), fmtC("indexNone", { label: "Rework" })];
+      expect("calib.index", JSON.stringify(a) === JSON.stringify(want) && JSON.stringify(b) === JSON.stringify(wantB) && JSON.stringify(e) === JSON.stringify(wantE), JSON.stringify({ a, b, e }));
+    }
+
+    // calib.findings (D10): three findings quoting 7.2, 3.1 and 5.2 → "2 of 3"; a reviews file without findings prints nothing
+    {
+      const rev = "## Review 1 · 2026-09-15 · codex · plan commit abc1234\nF1 blocking: 7.2 concurrent use is unanswered\nF2 advisory: probe 3.1 needs the separators\nF3 advisory: 5.2 limits\n14/14 layers · 42/42 probes\nVERDICT: READY\n### Dispositions\n- F1 · accepted · x\n- F2 · accepted · y\n- F3 · accepted · z\n";
+      const info = (reviews) => { const plans = loadStore(store({ ...hist(), "profile.md": PROFILE, "c.md": plan("c"), "c.reviews.md": reviews })); return checkPlan(plans.find((p) => p.slug === "c"), plans).info.filter((x) => x.startsWith("review findings on miss-history probes")); };
+      const three = info(rev), none = info("## Review 1 · 2026-09-15 · codex · plan commit abc1234\n14/14 layers · 42/42 probes\nVERDICT: READY\n"), empty = info("");
+      expect("calib.findings", JSON.stringify(three) === JSON.stringify([fmtC("findingsLine", { k: 2, n: 3 })]) && none.length === 0 && empty.length === 0, JSON.stringify({ three, none, empty }));
+    }
+
+    // calib.scale (D3): 1,000 done plans of 20 amendments each, under 2,000 ms
+    {
+      const plans = Array.from({ length: 1000 }, (_, i) => ({ fm: { status: "done" }, parseErrors: [], amendments: Array.from({ length: 20 }, (_, j) => ({ kind: j % 2 ? "discovered" : "requested", layer: `${1 + ((i + j) % 15)}.${1 + (j % 2)}` })) }));
+      const t0 = performance.now(); const h = missHistory(plans, PROFILE); const ms = performance.now() - t0;
+      expect("calib.scale", ms < 2000 && h.size > 0 && h.get("3.1")?.profile === true, `${Math.round(ms)} ms, ${h.size} probes`);
+    }
+  }
+
+  // calibration D6, D9: the reworks field and the twins warning
+  {
+    const am = (n, date, kind, extra, why = "why it changed") => `- A${n} · ${date} · ${kind} · ~D1 · layer: 4.1 · ${extra}${why}\n`;
+    const one = (amend) => { const c = checkIn(store(withReviews({ "c.md": plan("c", { amend }) }))); return { c: c.get("c"), p: c.plan("c") }; };
+    const reworkP = (c) => c.problems.filter((x) => x.includes(" reworks ") && x.endsWith("which is not an earlier amendment of this plan"));
+
+    // calib.rework (D6): forward, self and A0 are problems; a requested amendment is not counted; the field parses after
+    // package:; the numbers line ends "rework 0 of 0" on a plan with no misses
+    {
+      const D = "2026-09-16";
+      const good = one(am(1, D, "discovered", "") + am(2, D, "discovered", "reworks: A1 · ") + am(3, D, "requested", "reworks: A1 · "));
+      const bad = one(am(1, D, "discovered", "") + am(2, D, "discovered", "reworks: A9 · ") + am(3, D, "discovered", "reworks: A3 · ") + am(4, D, "discovered", "reworks: A0 · "));
+      const parsed = parsePlan(plan("p", { amend: "- A1 · 2026-09-16 · discovered · +D3 · layer: 4.1 · package: W1.1 · reworks: A1 · the second reader\n" }), "p.md").amendments[0];
+      const out = cli(store(withReviews({ "z.md": plan("z") })), "--check", "z").out.replace(/\n {6}· /g, " · ");
+      const want = [fmtC("reworkUnknown", { An: "A2", Ak: "A9" }), fmtC("reworkUnknown", { An: "A3", Ak: "A3" }), fmtC("reworkUnknown", { An: "A4", Ak: "A0" })];
+      const r = [reworkP(good.c).length === 0, good.c.report.rework === 1 && good.c.report.reworkOf === 2, JSON.stringify(reworkP(bad.c)) === JSON.stringify(want),
+        parsed.package === "W1.1" && parsed.reworks === "A1" && parsed.why === "the second reader", /prediction rate [^\n]* · rework 0 of 0\n/.test(out)];
+      expect("calib.rework", r.every(Boolean), JSON.stringify({ r, good: good.c.report.rework, bad: reworkP(bad.c), parsed }));
+    }
+
+    // calib.twins (D9): from CALIBRATION_FROM, a discovered or corrected miss names twins or a failing input
+    {
+      const ON = "2026-10-02", OFF = "2026-10-01";
+      const c = one(am(1, OFF, "discovered", "") + am(2, ON, "discovered", "") + am(3, ON, "discovered", "", "twins: the index reader") + am(4, ON, "corrected", "", "fails when: an empty store")
+        + am(5, ON, "requested", "") + am(6, ON, "corrected", "")).c;
+      const got = c.warnings.filter((w) => w.includes("names no twins and no failing input"));
+      expect("calib.twins", JSON.stringify(got) === JSON.stringify([fmtC("twinsMissing", { An: "A2" }), fmtC("twinsMissing", { An: "A6" })]), JSON.stringify(got));
+    }
+  }
+
+  // calib.host (D11, D26): a well-formed section prints its summary; no section is "not set"; each broken row is one
+  // problem with exit 1 on --profile and one warning on --check
+  {
+    const ROWS = ["- platform · win32 · measured 2026-10-01", "- node · v22.16.0 · measured 2026-10-01", "- git · git version 2.53.0.windows.1 · measured 2026-09-30", "- shell · GNU bash, version 5.2.37(1)-release · measured 2026-10-01"];
+    const prof = (rows) => cli(store({ "o.md": plan("o"), "profile.md": `# profile\n\n## Host\n${rows.join("\n")}\n\n## Audience\n- default · working\n- asked · 2026-09-17\n` }), "--profile");
+    const host = (r) => r.out.split("\n").filter((l) => /^(✗ )?host: /.test(l));
+    const good = prof(ROWS), none = cli(store({ "o.md": plan("o"), "profile.md": "# profile\n\n## Audience\n- default · working\n- asked · 2026-09-17\n" }), "--profile");
+    const broken = {
+      noMeasured: ["- node · v22.16.0"], badDate: ["- node · v22.16.0 · measured 2026-9-27"], duplicate: ["- Node · v22.16.0 · measured 2026-10-01", "- node · v22.16.0 · measured 2026-10-01"],
+      emptyValue: ["- node ·  · measured 2026-10-01"], extraField: ["- node · v22 · 16 · measured 2026-10-01"], longName: [`- ${"n".repeat(41)} · x · measured 2026-10-01`],
+    };
+    const bad = Object.entries(broken).filter(([, rows]) => { const r = prof(rows); const h = host(r); return !(r.code === 1 && h.filter((l) => l.startsWith("✗ host: ")).length === 1); }).map(([k]) => k);
+    const d = store({ "o.md": plan("o"), "profile.md": "# profile\n\n## Host\n- node · v22.16.0\n" });
+    const faults = storeMeta(loadStore(d)).faults;
+    expect("calib.host", good.code === 0 && JSON.stringify(host(good)) === JSON.stringify([fmtC("hostSummary", { n: 4, date: "2026-10-01" })]) && none.code === 0 && JSON.stringify(host(none)) === JSON.stringify([fmtC("hostNotSet")])
+      && bad.length === 0 && faults.length === 1 && faults[0].startsWith("profile.md ## Host: row is not"), JSON.stringify({ good: host(good), none: host(none), bad, faults }));
+  }
+
+  // calib.compat (D16): the pinned v0.1 checker reports the same problems for a plan with the three forms as without
+  // them, and --strip-v2 --dry-run completes on it
+  {
+    const dry = "- 2026-09-14 · note · dry-run · D1 · test: `node t.js` → 3 passing\n- 2026-09-14 · note · dry-run · D2 · n/a · the lint config lands in step 2\n";
+    const with3 = plan("cw", { preReady: dry, amend: "- A1 · 2026-09-16 · discovered · ~D1 · layer: 4.1 · twins: the index reader\n- A2 · 2026-09-16 · discovered · ~D1 · layer: 4.1 · reworks: A1 · fails when: an empty export\n" });
+    const without = plan("cw", { amend: "- A1 · 2026-09-16 · discovered · ~D1 · layer: 4.1 · the index reader\n- A2 · 2026-09-16 · discovered · ~D1 · layer: 4.1 · an empty export\n" });
+    const probs = (text) => { const d = store(withReviews({ "cw.md": text })); const r = node([PINNED_CHECKER, "--dir", d, "--check", "cw"]); return { set: r.stdout.split("\n").filter((l) => l.includes("✗")).map((l) => l.trim()).sort(), status: r.status, d }; };
+    const a = probs(with3), b = probs(without);
+    const strip = node([SELF, "--dir", a.d, "--strip-v2", "--dry-run"]);
+    expect("calib.compat", existsSync(PINNED_CHECKER) && JSON.stringify(a.set) === JSON.stringify(b.set) && a.status === b.status && strip.status === 0,
+      JSON.stringify({ with: a.set, without: b.set, strip: [strip.status, strip.stderr.slice(0, 200)] }));
+  }
+
+  // calib.inert (D25): --check, --brief, --list, the index writer and --profile never run or open what a note, a host
+  // row or a project-probe line names — child_process and fs.openSync are spied in the child process. Opens inside the
+  // store and of the checker's own scripts are allowed: Node 22.23's module loader reads the main module through
+  // fs.openSync (a file: URL), which 22.16's does not
+  {
+    const d = store({});
+    const ran = join(d, "ran"), named = join(tmp, "cal-inert-named.txt");
+    writeFileSync(named, "x");
+    const cmd = `node -e "require('fs').writeFileSync('${ran.replace(/\\/g, "/")}','x')"`;
+    const note = "- 2026-09-14 · note · dry-run · D2 · cmd: `" + cmd + "` → x\n";
+    writeFileSync(join(d, "c.md"), plan("c", { preReady: note }));
+    writeFileSync(join(d, "c.reviews.md"), goodReviews);
+    writeFileSync(join(d, "profile.md"), `# profile\n\n## Project probes\n- 3.1 · read ${named.replace(/\\/g, "/")} first\n\n## Host\n- config · ${named.replace(/\\/g, "/")} · measured 2026-10-01\n`);
+    const spyFile = join(tmp, "cal-inert-spy.mjs"), log = join(tmp, "cal-inert-log.json");
+    writeFileSync(spyFile, [
+      'import cp from "node:child_process"; import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { syncBuiltinESMExports } from "node:module";',
+      "const roots = [process.env.CAL_INERT_STORE, process.env.CAL_INERT_SELF].map((r) => path.resolve(r).toLowerCase() + path.sep); const seen = []; const write = fs.writeFileSync;",
+      'for (const k of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) { const f = cp[k]; cp[k] = function (...a) { seen.push("spawn " + k + " " + String(a[0])); return f.apply(this, a); }; }',
+      'const open = fs.openSync; fs.openSync = function (p, ...a) { const s = p instanceof URL || String(p).startsWith("file:") ? fileURLToPath(p) : String(p); const r = path.resolve(s).toLowerCase(); if (!roots.some((x) => r.startsWith(x))) seen.push("open " + p); return open.call(this, p, ...a); };',
+      "syncBuiltinESMExports();",
+      'process.on("exit", () => write(process.env.CAL_INERT_LOG, JSON.stringify(seen)));',
+    ].join("\n"));
+    const runs = [["--check", "c"], ["--brief"], ["--list"], [], ["--profile"]].map((a) => {
+      const r = node(["--import", pathToFileURL(spyFile).href, SELF, ...a, "--dir", d], { env: { ...process.env, CAL_INERT_STORE: d, CAL_INERT_SELF: dirname(SELF), CAL_INERT_LOG: log } });
+      let seen = null; try { seen = JSON.parse(readFileSync(log, "utf8")); } catch { /* the child died before exit */ }
+      return { args: a.join(" ") || "(index)", status: r.status, seen };
+    });
+    expect("calib.inert", !existsSync(ran) && runs.every((r) => Array.isArray(r.seen) && r.seen.length === 0) && existsSync(join(d, "README.md")),
+      JSON.stringify({ ran: existsSync(ran), runs }));
+  }
+
+  // calibration D7, D13, D14, D30: the documents, read relative to the script as rubric-sync reads layers.md
+  {
+    const ref = (f) => { const p = join(dirname(SELF), "..", f); return existsSync(p) ? readFileSync(p, "utf8").replace(/\r\n/g, "\n") : ""; };
+    const between = (text, start, stop) => { const at = text.indexOf(start); if (at < 0) return ""; const end = text.indexOf(stop, at + start.length); return text.slice(at, end < 0 ? undefined : end); };
+    const count = (text, s) => text.split(s).length - 1;
+    const tpl = ref("references/plan-template.md"), life = ref("references/lifecycle.md"), layers = ref("references/layers.md"), skill = ref("SKILL.md"), readme = ref("README.md");
+
+    // calib.documented (D13): every value of the exported table is in plan-template.md › ## Calibration, and the
+    // calib region pushes nothing to problems, warnings or info but an fmtC( call
+    {
+      const sec = between(tpl, "\n## Calibration\n", "\n## ");
+      const src = readFileSync(SELF, "utf8");
+      const region = between(src, "// calib:" + "begin", "// calib:" + "end");
+      const notInTemplate = Object.values(MESSAGES_CALIBRATION).filter((m) => !sec.includes(m));
+      const literal = [...region.matchAll(/\b(?:problems|warnings|info)\.push\((?!fmtC\()[^\n]{0,60}/g)].map((x) => x[0]);
+      expect("calib.documented", sec.length > 0 && region.length > 0 && !notInTemplate.length && !literal.length, JSON.stringify({ sec: sec.length, notInTemplate, literal }));
+    }
+
+    // calib.report-template (D7): the Rework line directly after Prediction rate inside the code block, and the sentence after it
+    {
+      const REWORK = "Rework                     <r> of <m> misses corrected an earlier amendment";
+      const report = between(life, "\n## `report <slug>`", "\n## Slugs");
+      const lines = report.split("\n");
+      const k = lines.findIndex((l) => l.startsWith("Prediction rate"));
+      const fencesBefore = lines.slice(0, k).filter((l) => l.startsWith("```")).length;
+      const close = lines.findIndex((l, i) => i > k && l.startsWith("```"));
+      const after = lines.slice(close + 1).join("\n");
+      expect("calib.report-template", k > 0 && lines[k + 1] === REWORK && fencesBefore % 2 === 1 && close > k + 1 && after.includes("The rework line stands beside the rate, never instead of the rate."), JSON.stringify({ k, next: lines[k + 1], fencesBefore, close }));
+    }
+
+    // calib.docs (D14): each phrase in its file and section
+    {
+      const recon = between(skill, "\n### 1. Recon", "\n### "), step5 = between(skill, "\n### 5.", "\n### ");
+      const profile = between(layers, "\n## Project profile", "\n## ");
+      const approve = life.split("\n").find((l) => l.startsWith("| `draft` | `approve` |")) ?? "";
+      const r = [recon.includes("spike"), step5.includes("dry-run note"), profile.includes("## Host"), profile.includes("miss history"), approve.includes("dry-run note"),
+        ...["dry-run", "miss history", "reworks:", "## Host"].map((s) => readme.includes(s))];
+      expect("calib.docs", r.every(Boolean), JSON.stringify(r));
+    }
+
+    // calib.code-m-docs (D30, A3): each code-M rule's sentence exactly once in its file
+    {
+      const RULES = [
+        [layers, "failing input was run once against the real check before approval, with its output recorded"],
+        [layers, "a failing case never run is a Gap"],
+        [layers, "cites its source: three real runs with their spread, a specification, or a `reversible` assumption with a `fallback:`"],
+        [tpl, "runs that check's planted fault in the same step"],
+        [skill, "one real instance of each live check's environment before approval"],
+      ];
+      const counts = RULES.map(([text, s]) => count(text, s));
+      expect("calib.code-m-docs", counts.every((n) => n === 1), JSON.stringify(counts));
+    }
+  }
+
   const passed = results.filter(([, ok]) => ok).length;
-  return { ok: passed === results.length, summary: `${passed}/${results.length} cases (${results.filter(([, ok]) => !ok).map(([n]) => n).join(", ") || "all pass"})`, details };
+  const slowest = [...gaps].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, ms]) => `slowest: ${name} ${Math.round(ms)} ms`);
+  return { ok: passed === results.length, summary: `${passed}/${results.length} cases (${results.filter(([, ok]) => !ok).map(([n]) => n).join(", ") || "all pass"})`, details, slowest };
 }
 
 // ---------------------------------------------------------------- cli
@@ -3263,7 +4798,7 @@ function main(argv) {
   }
   let dir;
   try { dir = resolveStore(opt("--dir")); } catch (e) { console.error(`dod: ${e.message}`); return args.includes("--brief") ? 0 : 1; }
-  const plans = loadPlans(dir);
+  const plans = loadStore(dir);
 
   if (args.includes("--brief")) { console.log(briefLine(plans, dir, existsSync(dir) && !indexIsFresh(dir, plans))); return 0; }
   if (!existsSync(dir)) { console.error(`no plan store at ${dir} — run the dod skill's setup, or pass --dir`); return 1; }
@@ -3274,6 +4809,14 @@ function main(argv) {
   }
   if (args.includes("--list")) { const text = listPlans(plans); console.log(text); for (const l of namesFooter(text)) console.log(l); return 0; }
   if (args.includes("--profile")) return profileCommand(dir);
+  // review-loop D5: --review-prompt <slug> [--reviewer codex|subagent|human] [--scope A<n>,…]
+  if (args.includes("--review-prompt")) {
+    const known = new Set(["--review-prompt", "--reviewer", "--scope", "--dir"]);
+    const odd = args.filter((a, k) => a.startsWith("--") && !known.has(a) && !known.has(args[k - 1]));
+    const r = odd.length ? { code: 1, lines: [fmtV("promptUsage")] } : reviewPrompt(dir, plans, { slug: opt("--review-prompt"), reviewer: opt("--reviewer"), scope: opt("--scope") });
+    for (const l of r.lines) (r.code ? console.error : console.log)(cleanLine(redactEnv(l).text));
+    return r.code;
+  }
 
   if (args.includes("--check-index")) {
     const legacy = legacyFooter(dir);
@@ -3291,14 +4834,16 @@ function main(argv) {
     const c = checkPlan(plan, plans);
     const r = c.report;
     const legacy = legacyFooter(dir);
-    const warns = [...(legacy.kind !== "ok" ? [legacyMessage(legacy)] : []), ...c.warnings];
+    const warns = [...(legacy.kind !== "ok" ? [legacyMessage(legacy)] : []), ...storeMeta(plans).faults, ...c.warnings];
     // every printed line is plain text of at most 120 columns; plan text inside a message is sanitised first
     const printed = [];
     const say = (line, prefix = "") => { for (const l of wrapLine(plainText(line), 120, prefix)) { printed.push(l); console.log(l); } };
     say(`${showSlug(slug)} · ${plan.fm.status} · verified ${c.verified}/${c.total}`);
-    say(`baseline ${r.baseline} · discovered ${r.discovered} amendment(s) / ${r.discoveredDesign} design change(s) (wrong ${r.wrong} · missed ${r.missedOps}) · corrected ${r.corrected} · requested ${r.requested} · emergent ${r.emergent} · defect ${r.defect} · external ${r.external}` + (r.rate == null ? "" : ` · prediction rate ${r.rate} %`) + (r.grew == null ? "" : ` · ${grewLine(r.grew)}`), "  ");
+    say(`baseline ${r.baseline} · discovered ${r.discovered} amendment(s) / ${r.discoveredDesign} design change(s) (wrong ${r.wrong} · missed ${r.missedOps}) · corrected ${r.corrected} · requested ${r.requested} · emergent ${r.emergent} · defect ${r.defect} · external ${r.external}` + (r.rate == null ? "" : ` · prediction rate ${r.rate} %`) + (r.grew == null ? "" : ` · ${grewLine(r.grew)}`) + reworkPart(r), "  ");
+    say(historyLine(plan, plans), "  ");
     say(checkSummary(plan, c, warns.length), "  ");
     for (const w of warns) say(`warn: ${w}`, "  ");
+    for (const x of c.info) say(x, "  ");
     for (const p of c.problems) say(`✗ ${p}`, "  ");
     for (const l of namesFooter(printed.join("\n"), plan)) console.log(l);
     return c.problems.length ? 1 : 0;

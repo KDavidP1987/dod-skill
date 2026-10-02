@@ -1,0 +1,58 @@
+name: Field audit
+description: Report how dod did across several plans on one real project — numbers, the probes that missed, and findings with a suggestion each.
+title: "Field audit: "
+labels: [field-audit]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A field audit looks at several plans on one project together (see issue #4 for an example).
+        Numbers and probe ids are what help most. Never paste a token, a private path or code you may not share.
+  - type: input
+    id: project
+    attributes:
+      label: Project and stack
+      placeholder: "A game server mod (C#, BepInEx)"
+    validations:
+      required: true
+  - type: input
+    id: dod-version
+    attributes:
+      label: dod version and rubric
+      placeholder: "0.3.0, rubric 2"
+    validations:
+      required: true
+  - type: input
+    id: dates
+    attributes:
+      label: Dates covered
+      placeholder: "2026-09-23 to 2026-09-26"
+  - type: input
+    id: reviewer
+    attributes:
+      label: Reviewer used
+      placeholder: "Codex CLI read-only, with human approvals"
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers
+      description: One row per plan — size, status, baseline items, review rounds, first READY by, design changes, prediction rate.
+      value: |
+        | Plan | Size | Status | Baseline items | Review rounds | First READY by | Design changes | Prediction |
+        |---|---|---|---|---|---|---|---|
+    validations:
+      required: true
+  - type: textarea
+    id: missed-probes
+    attributes:
+      label: Missed probes
+      description: Over the closed plans, as design changes per probe, e.g. "6.1 ×8, 4.5 ×5".
+  - type: textarea
+    id: findings
+    attributes:
+      label: Findings
+      description: One per item — severity (high, medium, low), area, what happened, and a suggestion.
+      placeholder: |
+        1. **High, calibration.** What happened … *Suggestion:* …
+    validations:
+      required: true

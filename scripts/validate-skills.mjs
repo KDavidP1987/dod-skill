@@ -121,16 +121,38 @@ function parseFrontmatter(text) {
   return { data, body };
 }
 
-function checkSkill(name) {
-  const dir = join(skillsDir, name);
+// Every helper's --selftest gets this long (plan-limits D9). It used to be 60 s, and the dod-index selftest —
+// 15–22 s standalone — was killed under contention on a busy machine, which the old code reported as
+// "failed (exit null)" and nobody could explain. DOD_VALIDATE_BUDGET_MS in the caller's environment replaces the
+// budget and is then named on every line that prints it, so a run under a changed budget never reads as a
+// default run.
+export const DEFAULT_BUDGET_MS = 180_000;
+export function helperBudget(env = process.env) {
+  const override = Number(env.DOD_VALIDATE_BUDGET_MS);
+  const ms = override > 0 ? Math.floor(override) : DEFAULT_BUDGET_MS;
+  return { ms, overridden: override > 0, note: override > 0 ? `budget ${ms} ms from DOD_VALIDATE_BUDGET_MS` : `budget ${ms} ms` };
+}
+
+// The status line: every helper's elapsed, and the budget when it is not the default.
+export function statusLine(r) {
+  const status = r.errors.length ? "FAIL" : r.warnings.length ? "warn" : "ok  ";
+  const parts = (r.timings ?? []).map((x) => `${x.file.replace(/\.(mjs|js|cjs)$/, "")} ${(x.ms / 1000).toFixed(1)} s`);
+  if (r.budget?.overridden) parts.push(r.budget.note);
+  return `${status}  ${r.name}${parts.length ? ` (${parts.join(" · ")})` : ""}`;
+}
+
+export function checkSkill(name, skillsRoot = skillsDir) {
+  const dir = join(skillsRoot, name);
   const errors = [];
   const warnings = [];
+  const timings = [];
+  const budget = helperBudget();
   const skillFile = join(dir, "SKILL.md");
 
-  if (!existsSync(skillFile)) return { name, errors: ["missing SKILL.md"], warnings, description: "" };
+  if (!existsSync(skillFile)) return { name, errors: ["missing SKILL.md"], warnings, description: "", timings, budget };
   const text = readFileSync(skillFile, "utf8");
   const fm = parseFrontmatter(text);
-  if (fm.error) return { name, errors: [fm.error], warnings, description: "" };
+  if (fm.error) return { name, errors: [fm.error], warnings, description: "", timings, budget };
   const { data, body } = fm;
 
   if (!NAME_RE.test(name) || name.length > MAX_NAME) errors.push(`folder name must be kebab-case, ≤ ${MAX_NAME} chars`);
@@ -160,18 +182,28 @@ function checkSkill(name) {
     for (const f of readdirSync(scriptsDir).filter((f) => /\.(mjs|js|cjs)$/.test(f))) {
       const p = join(scriptsDir, f);
       if (!readFileSync(p, "utf8").includes("--selftest")) { warnings.push(`scripts/${f} has no --selftest — add one so CI can prove it works`); continue; }
-      const r = spawnSync(process.execPath, [p, "--selftest"], { encoding: "utf8", timeout: 60_000 });
+      const t0 = performance.now();
+      const r = spawnSync(process.execPath, [p, "--selftest"], { encoding: "utf8", timeout: budget.ms });
+      const ms = Math.round(performance.now() - t0);
+      timings.push({ file: f, ms });
       const out = ((r.stdout ?? "") + (r.stderr ?? "")).trim().split(/\r?\n/).at(-1) ?? "";
-      if (r.status !== 0) errors.push(`scripts/${f} --selftest failed (exit ${r.status}): ${out}`);
+      // a kill is not a failed case: it says how long the helper ran and how much it was allowed
+      if (r.error?.code === "ETIMEDOUT" || (r.status === null && r.signal)) errors.push(`scripts/${f} --selftest killed after ${ms} ms (${budget.note})`);
+      else if (r.error) errors.push(`scripts/${f} --selftest could not start: ${r.error.message}`);
+      else if (r.status !== 0) {
+        // the failing cases themselves, so a red CI log names them (at most five, each cut to 300 characters)
+        const failed = (r.stdout ?? "").split(/\r?\n/).filter((l) => /^FAIL\b/.test(l)).slice(0, 5).map((l) => `\n          ${l.slice(0, 300)}`).join("");
+        errors.push(`scripts/${f} --selftest failed (exit ${r.status}): ${out}${failed}`);
+      }
     }
   }
 
-  return { name, errors, warnings, description: data.description || "" };
+  return { name, errors, warnings, description: data.description || "", timings, budget };
 }
 
 // Everything below runs only when this file is the program. Imported (by
-// scripts/tests/check-versions.test.mjs) it is just a module, so importing it does
-// not validate the repository as a side effect.
+// scripts/tests/check-versions.test.mjs and scripts/tests/validate-budget.test.mjs) it is
+// just a module, so importing it does not validate the repository as a side effect.
 const invokedDirectly = process.argv[1] !== undefined
   && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 if (!invokedDirectly) { /* imported for its exports */ } else {
@@ -181,7 +213,7 @@ if (!existsSync(skillsDir)) {
   process.exit(1);
 }
 const names = readdirSync(skillsDir).filter((n) => !n.startsWith(".") && !n.startsWith("_") && statSync(join(skillsDir, n)).isDirectory()).sort();
-const results = names.map(checkSkill);
+const results = names.map((n) => checkSkill(n));
 
 if (wantTable) {
   console.log("| Skill | What it does |");
@@ -192,8 +224,7 @@ if (wantTable) {
 
 let failed = 0;
 for (const r of results) {
-  const status = r.errors.length ? "FAIL" : r.warnings.length ? "warn" : "ok  ";
-  console.log(`${status}  ${r.name}`);
+  console.log(statusLine(r));
   for (const e of r.errors) console.log(`        error: ${e}`);
   for (const w of r.warnings) console.log(`        warn:  ${w}`);
   if (r.errors.length) failed++;

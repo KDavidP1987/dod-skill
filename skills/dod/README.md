@@ -3,7 +3,7 @@
 *Plan a feature across fifteen consideration layers, get the plan independently reviewed, freeze it,
 track the build against it, and close with a number: how much of the design the plan foresaw.*
 
-Version 0.2.0 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Walkthrough of a real plan](../../docs/dod-walkthrough.md)
+Version 0.3.0 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Walkthrough of a real plan](../../docs/dod-walkthrough.md)
 
 ## Contents
 
@@ -16,9 +16,10 @@ Version 0.2.0 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](h
 7. [Reviewers](#reviewers)
 8. [Audience profile](#audience-profile)
 9. [The referee script](#the-referee-script)
-10. [Rules the skill will not bend](#rules-the-skill-will-not-bend)
-11. [Limits of this version](#limits-of-this-version)
-12. [Files in this skill](#files-in-this-skill)
+10. [Calibration](#calibration)
+11. [Rules the skill will not bend](#rules-the-skill-will-not-bend)
+12. [Limits of this version](#limits-of-this-version)
+13. [Files in this skill](#files-in-this-skill)
 
 ## What it is for
 
@@ -209,6 +210,15 @@ builder could not make alone; edge cases, cleanup and extra fixtures are advisor
 silent. When a round leaves no gating probe open and every finding is decision-free, the skill says so
 and recommends approval rather than another round.
 
+One command builds the prompt: `node scripts/dod-index.mjs --review-prompt <slug> [--reviewer codex|subagent|human] [--scope A<n>,…]`.
+It writes the prompt to the temporary folder and prints the heading to record the review under — the plan's
+commit, size and item count, and a hash of the files the reviewer was given. After an amendment,
+`--scope A3,A5` builds a scoped re-review: only those amendments and the probes they touch. Three `codex` or
+`subagent` rounds is the round cap. A fourth needs the owner's round-cap note in the plan's Log
+(`- <date> · note · round cap · after Review <k> · owner: <decision>`), which the agent never writes for
+them; `--check` reports a fourth round without it and `--review-prompt` refuses to build one. A human
+review is the owner's own act and needs no note.
+
 ## Audience profile
 
 Plans are read by people who are technical but not fluent in every technology their product uses — the
@@ -314,6 +324,22 @@ a repository) `close` can post a closed plan's numbers — rate, kinds, missed p
 scrubbed amendment `why` — as one issue on this skill's own repository under the `dod-feedback` label. Off
 is the default: nothing is sent, asked or written without a consent entry.
 
+## Calibration
+
+Four additions make a plan's evidence match what the project has already got wrong. Each is described with its exact
+grammar in `references/plan-template.md` › Calibration.
+
+- **Dry-run notes.** Before approval, every `test` and `cmd` item's command is run once on the draft and the output is
+  recorded: ``note · dry-run · D3 · cmd: `npm test` → 12 passing``, or `n/a` with a reason. For plans approved from
+  2026-10-02, `--check` reports an item without one at approval.
+- **Miss history.** The probes this store's done plans kept missing — named by discovered or corrected amendments in two
+  or more of them — plus the profile's `## Project probes`. `--check` prints them after its numbers line, the index
+  lists them, and a new plan must show an observed dry run on an item that answers each probe of the miss history.
+- **Rework.** An amendment that fixes an earlier amendment's fix says so with `reworks: A<k>`; `--check`, the index and
+  the close report count it beside the prediction rate.
+- **`## Host`.** `profile.md` records the machine the checks ran on — platform and tool versions, each measured by a
+  spike and dated — and `--profile` checks the rows.
+
 ## Rules the skill will not bend
 
 - **Unknown → Gap.** Never Considered, never checked, never done, on inference.
@@ -331,9 +357,10 @@ is the default: nothing is sent, asked or written without a consent entry.
 ## Limits of this version
 
 - One plan per file, one store per project, git as the concurrency control (no locks).
-- Autonomous plan maintenance via hooks, and the `audit` / `enhance` subcommands, are planned for dod 0.3.
-- A plan over 1 MB, over 500 items, or holding a line over 10,000 characters is warned about, not refused;
-  whether it should be refused is a dod 0.3 decision (`plan-limits`).
+- Autonomous plan maintenance via hooks, and the `audit` / `enhance` subcommands, are planned for dod 0.4.0, with
+  scoring rules that sort a reversal by its cause and a second reviewer from another model family.
+- A plan over 1 MB or over 500 items gets a warning and is still read; a line over 10,000 characters is a problem
+  (`--check` fails and the line is parsed as written) — the longest line in a real plan so far is under 7,000.
 - The review loop does not converge on its own: three rounds is the cap, and the stopping signal plus a
   human decision is the control. Expect real findings in every round.
 
@@ -360,4 +387,5 @@ tests/fixtures/                   the pinned 0.1 checker the selftest compares a
 tests/trigger-logs/2026-09-21-wbs-tree.jsonl        the `claude -p` transcript behind the work-breakdown trigger row
 tests/trigger-logs/2026-09-21-page-review.jsonl     the transcript behind the `/dod page … --review` row
 tests/trigger-logs/2026-09-21-amend-emergent.jsonl  the transcript behind the `/dod amend … emergent` row
+tests/trigger-logs/2026-10-01-plan.jsonl            the transcript behind the 0.3.0 plain-words planning row
 ```

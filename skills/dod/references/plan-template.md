@@ -80,6 +80,7 @@ review: pending
 ## Performance
 ## Build plan
 1. <step an agent that has never seen this conversation can execute — paths, commands, schemas> · satisfies D1, D3
+2. <the step that builds a check runs that check's planted fault in the same step and logs `note · planted · D<n> · …`> · satisfies D2
 ## Work breakdown     (required at rubric 2 for L and Epic; see "Work packages" below)
 - W1 · **<parent title>**
 - W1.1 · **<leaf title>** · items: D1 D3 · steps: 1, 2
@@ -222,8 +223,9 @@ appending each removed line to `<store>/.strip-v2/<slug>.removed.md` — an earl
 | `## Proposed` | `- P-<n> · <layer or probe> · <proposed change> · <why>` | P-items never count as D-items, coverage, completion or rate; an empty section is valid | `Proposed: line does not match the grammar` |
 
 When an Epic is `done`, each child is checked on its own: `child <slug> has no plan file`, `child <slug> has parent <p>, not <epic>`,
-`child <slug> is <status>, not done`, `child <slug> has <n> check problem(s)`. Limits are warnings, never problems: `plan exceeds 1 MB`,
-`plan exceeds 500 items`, `line <n> is over 10,000 characters — skipped`. `--check` prints one summary line before the problem list:
+`child <slug> is <status>, not done`, `child <slug> has <n> check problem(s)`. Limits: `line <n> is over 10,000 characters` is a problem
+(the line is parsed as written, not blanked); `plan exceeds 1 MB` and `plan exceeds 500 items` are warnings. `--check` prints one summary
+line before the problem list:
 `check <slug> · kind <k> · parent <p> · rubric <r> · versions <n> · problems <x> · warnings <y>`.
 
 ## Rubric 2 — the accuracy additions
@@ -358,6 +360,142 @@ most-grown first — or `grew: none` when the section exists and nothing grew. A
 
 The field is optional everywhere else, so `requested`, `defect`, `emergent` and `external` amendments are
 unaffected, and so is every plan written before this section existed.
+
+## Review loop — cap, growth, signal, scope
+
+Four rules read the reviews file (review.md has the procedure; the texts here are the ones the script prints):
+
+- **Round cap.** Reviews are counted in runs: a run starts after a READY review, or at Review 1 when there is
+  none. A `codex` or `subagent` review that is the fourth or later of its run needs the owner's Log note
+  `- <date> · note · round cap · after Review <k> · owner: <decision>`, optionally ending
+  ` · through Review <m>`, where `k` is the review before it (or `m` is at least its number), dated on or after
+  Review `k`. Missing, it is a problem while the plan is `draft` or `review: pending` and a warning otherwise; a
+  review dated on or before 2026-09-26, when the rule was built, only ever warns. A `human` review never needs a
+  note. `--review-prompt` refuses to build the fourth non-human round of a run without the note.
+- **Growth.** A review heading may carry ` · plan <bytes> B · <n> items` (the plan's size and item count when the
+  prompt was built); `--check` warns when the latest stamped review of the run is more than 50 % larger than
+  the first.
+- **Stopping signal.** For a run of two or more reviews ending in REVISE, `--check` prints one information line.
+  The signal is met when the latest review has no untagged finding, every `blocking` finding quotes a probe,
+  none quotes a gating probe and none re-raises a probe a `blocking` finding of the review before quoted. It
+  changes no problem, warning or approval.
+- **Scope.** `--review-prompt --scope A<n>,…` builds a re-review of named amendments; the heading carries
+  ` · scope A<n>,…`. A READY clears the gating or removal amendments its scope names, or all of them when it is
+  unscoped. A `blocking` finding of a scoped review whose probes all lie outside the amendments' `layer:` probes
+  is warned about.
+
+The heading's optional fields, in order after the reviewer: `plan commit <sha>` or `plan uncommitted`,
+` · plan <bytes> B · <n> items`, ` · files <k> · <12 hex>` (the code-file manifest's hash), ` · prompt <12 hex>`
+(the prompt file's hash) and ` · scope A<n>,…`. A child whose rollback reverse-applies its own commits lists each
+as `- <date> · note · own commit <sha>`.
+
+Every text, with `<name>` filled in (`<k>` in the refusal is the review before the one refused):
+
+`--check` — the loop (problems, warnings, the information line):
+
+- `Review <n> is round <r> of a run with no READY — log "note · round cap · after Review <k> · owner: <decision>" before it`
+- `review growth: Review <a> <x> KB · <i> items → Review <b> <y> KB · <j> items, +<p> % in this run`
+- `review loop: <k> rounds since <since> · stopping signal met at Review <n>`
+- `review loop: <k> rounds since <since> · stopping signal not met at Review <n> — <reason>`
+- `F<f> is untagged`
+- `F<f> is blocking and quotes no probe`
+- `F<f> quotes gating probe <p>`
+- `F<f> re-raises <p> from Review <m>`
+- `Review <n> is scoped <id>, which is not an amendment of this plan`
+- `Review <n> is scoped <ids>; F<f> is blocking but quotes only <probes>, outside the scope — advisory by the scope rule: disposition it advisory, or rerun unscoped`
+
+`--review-prompt` — refusals and failures:
+
+- `review-prompt: Review <n> would be round <r> of a run with no READY — log "note · round cap · after Review <k> · owner: <decision>" first, or build with --reviewer human`
+- `usage: dod-index.mjs --review-prompt <slug> [--reviewer codex|subagent|human] [--scope A<n>,…] [--dir <store>]`
+- `review-prompt: no plan <slug> in the store`
+- `review-prompt: <slug> has <k> check problem(s) — fix them first`
+- `review-prompt: the redacted plan <what> — not written`
+- `review-prompt: <id> is not an amendment of <slug>`
+- `review-prompt: cannot write <path> (<code>)`
+- `review-prompt: <name> was replaced by another run — build again`
+
+`--review-prompt` — the code-file manifest (`no code files:` and one reason per excluded citation):
+
+- `no code files: <reason>`
+- `the plan cites none`
+- `not a git repository`
+- `git timed out after 10 s`
+- `git exited <code>`
+- `… and <n> more: <reason>`
+- `not found`
+- `a link`
+- `outside the repository`
+- `untracked`
+- `ignored`
+- `in the plan store`
+- `refused name`
+- `binary`
+- `not UTF-8`
+- `token-shaped content at line <n>`
+- `over budget (<bytes> B, <left> B left)`
+- `over the 200-citation cap`
+
+## Calibration
+
+Four additions, all read by `dod-index.mjs`; a v0.1 or v0.2 checker reads each as text it already accepts.
+
+- **Dry-run note** (a Log `note`): `- <date> · note · dry-run · D<n> · <test|cmd>: <code span> → <what it printed>` or
+  `- <date> · note · dry-run · D<n> · n/a · <reason of 12 characters or more>`. The command is one Markdown code span —
+  a command holding a backtick uses a longer fence — so an arrow inside it never splits the note. In a plan baselined
+  on or after 2026-10-02, every `test` and `cmd` item of the Baseline needs one dated on or before `baselined` and
+  written before the `status → ready` line (a backlog plan's pass before that line stands in for it). A note never
+  verifies an item; the `pass` line does. Write `<home>` or `<tmp>` for a path under the home or temp directory.
+- **Miss history**: every probe a discovered or corrected amendment's `layer:` names in two or more done plans,
+  plus every `- <n>.<m> · …` row under `profile.md` › `## Project probes`. A plan under the dry-run rule needs, for
+  each history probe its Coverage map answers with items, one of those items with a dry-run note that is not `n/a`.
+- **Rework field** (an amendment): `- A<n> · <date> · <kind> · <ops> · layer: <x> · [package: W<n>.<m> · ]reworks: A<k> · <why>`
+  — this miss corrects an earlier amendment's fix. A discovered or corrected amendment dated from 2026-10-02 names
+  its twins (`twins: <other places>`) or its failing input (`fails when: <input>`) in its why.
+- **Host** (`profile.md` › `## Host`): `- <name> · <value> · measured <YYYY-MM-DD>`, one row per name.
+
+The texts the script prints (`MESSAGES_CALIBRATION`; `<name>` is filled in):
+
+Dry-run notes (D1, D2, D24, D27):
+- dry-run note does not match the grammar: <text>
+- dry-run note names <id>, which is not an item of this plan
+- <id>'s dry-run note says <type>, but the item's evidence is <itemType>
+- <id>'s dry-run n/a reason is shorter than 12 characters
+- D<n> has no dry-run note before approval — run its command on the draft and record what it printed, or record why it cannot run yet
+- D<n>'s dry-run note carries a home path or an e-mail — write <home> or <tmp> instead
+
+Miss history (D3–D5, D26, D29):
+- probe <p> has a miss history (<k> of <n> done plans) and none of its items <ids> has an observed dry run
+- probe <p> is a project probe of profile.md and none of its items <ids> has an observed dry run
+- coverage <coverage> · miss history: <list>
+- coverage <coverage> · miss history: none yet (<n> done plans)
+-  · incomplete: <k> file(s) could not be read, see the warnings
+- miss history: profile.md unreadable (<code>) — computed from the store only
+- miss history: profile.md row is not `- <probe> · …` with a rubric-2 probe — skipped: <text>
+- miss history: <name> does not parse — skipped
+- miss history: the store changed during this run — rerun for a consistent result
+
+Rework and twins (D6, D9):
+- <An> reworks <Ak>, which is not an earlier amendment of this plan
+-  · rework <r> of <m>
+- <An> names no twins and no failing input — add "twins: <other places>" or "fails when: <input>"
+
+Index and review findings (D8, D10):
+- Miss history — done plans: <list>
+- Rework — done plans: <r> of <m> misses corrected an earlier amendment.
+- <label> — done plans: none yet.
+- review findings on miss-history probes: <k> of <n>
+
+Host (D11):
+- host: <n> rows · measured <date>
+- host: not set
+- ✗ host: <reason>
+- row is not `- <name> · <value> · measured <YYYY-MM-DD>`: <text>
+- <name> is measured "<date>", which is not a valid YYYY-MM-DD
+- row name is empty or longer than 40 characters: <text>
+- <name> has an empty value
+- <name> appears more than once (names compare case-insensitively)
+- profile.md ## Host: <reason> — skipped
 
 ## ID legend
 

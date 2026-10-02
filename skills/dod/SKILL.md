@@ -14,7 +14,7 @@ description: >-
 license: MIT
 metadata:
   author: SkillEra
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # DOD — Definition of Done
@@ -84,6 +84,9 @@ the children inherit or delegates it to a named child with a constraint; gating 
   worded, per technology. A technology the recon touched that has no row is asked about **once, before
   the question batch** (the one-technology re-ask in audience.md); no section at all → the full audience
   question once, then the batch. `--autonomous` never asks: it writes ` · assumed` rows instead.
+- Run a spike for each live check the plan will name: one real instance of each live check's environment before approval
+  (the platform, the tool version, the file shape it reads), its output quoted in the Log as `note · spike · <command> →
+  <output>` and, for the host, in `profile.md` › `## Host` (layers.md › Project profile).
 - Greenfield: there is nothing to read. State each assumption you would otherwise have looked up, typed
   (`validated` / `reversible` / `decision-required`).
 - Check for a plan store (`dod-store:` line in the instructions file, else `docs/dod/`). None → offer
@@ -147,10 +150,15 @@ summary at the reader's level, the items verbatim. Not the whole plan. Then run 
 going on — it enforces the grammar and the invariants you just wrote against.
 
 ### 5. Independent review — the author never grades alone
+First the dry run: run every `test` and `cmd` item's command once on the draft and record a dry-run note —
+``note · dry-run · D<n> · cmd: `<command>` → <what it printed>``, or `· n/a · <why it cannot run yet>` — before the
+ready line (plan-template.md › Calibration). From 2026-10-02 `--check` reports an item without one at approval.
 Follow `references/review.md`. Reviewer preference: Codex CLI (read-only) → a fresh-context subagent
 (never a fork) → the user answering the rubric's four questions. The reviewer gets a score-redacted plan
 and never sees prior reviews. Reviews go in `docs/dod/<slug>.reviews.md`, not the plan. Disposition every
 finding; up to 3 rounds; a disagreement is shown with both coverage lines, never averaged.
+Build the prompt with `scripts/dod-index.mjs --review-prompt <slug>`; a fourth `codex` or `subagent` round
+needs the owner's round cap note first (review.md) — ask them, never write it for them.
 No reviewer at all → the plan stays `draft`, `review: pending`. There is no `self`.
 
 ### 6. Approve
