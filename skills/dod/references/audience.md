@@ -33,7 +33,7 @@ Coverage pointer, a Log line, or anything the reviewer receives.
 - at most 500 technology rows; the file at most 1 MB.
 
 `node <skill>/scripts/dod-index.mjs --profile [--dir <store>]` prints one line — `audience: default working ·
-4 technologies · asked 2026-09-15`, or `audience: not set — run setup` — and lists every grammar problem
+4 technologies · asked 2026-09-15 · detail full` (the `detail` row is *Detail* below), or `audience: not set — run setup` — and lists every grammar problem
 as `✗ audience: …` with exit 1. Run it after every write to the section. If it does not return within
 30 seconds, stop waiting, say `audience: --profile did not complete in 30 s — section not checked`, and
 treat the section as unreadable (effective level `expert`, below) — never hand-parse it as a substitute.
@@ -178,6 +178,51 @@ Re-running `setup` shows the current rows, asks again, and rewrites the section 
 drop rows for technologies the scan no longer finds and never drops one silently. "Once" means once per
 listed technology: a later plan that touches a technology the scan never listed asks about that one
 technology, one row, and never again about a rated one.
+
+## Detail
+
+How much of each person-facing output is shown at once, set once per project beside the levels. It is
+one row of the same section — `- detail · full`, `- detail · short` or `- detail · short+details` — and no
+row means `full`. `detail` is a reserved name like `who`, `default` and `asked`, never a technology.
+`--profile` ends its summary with ` · detail <value>`, and reports any other value
+(`✗ audience: detail "<v>" must be full, short or short+details`) or a second row
+(`✗ audience: detail appears more than once`).
+
+The question is asked in the same message, right after the levels question (*The question*), and only
+there. Text, verbatim:
+
+```
+One more: how much should I show at once?
+  full           — everything in the message, as today (the most to read; the most tokens)
+  short          — one line per item; ask `explain <n>` for the rest (the fewest tokens; a turn per detail)
+  short+details  — one line per item, with the details folded underneath (about as many tokens as full,
+                   but the first read is short)
+Answer with `detail <value>`, or nothing to keep `full`.
+```
+
+The answer `detail <value>` writes the row; no answer, `skip`, or a value not in the list writes nothing
+and leaves `full`.
+
+**The `short+details` format.** It applies to every person-facing output: question batches, the plan
+summary of plan step 4, and the review page. Each one is a list of numbered items, and each item is:
+
+1. a topic label, then the question or statement in one line;
+2. one line of context — what it is about, in plain words;
+3. a `Recommended:` line, where a recommendation exists;
+4. then a collapsed `Details` (a `<details>` block on a page, an indented block in the conversation)
+   holding the why, each option's consequence (*Recommendations* above — never bare), and a `Technical:`
+   line with the terms of art, probe ids and file paths.
+
+The plan file itself is never shortened: the D-items, Build plan, Coverage, Log and Baseline are grammar
+(*Where it never applies*), and so are the prose sections of the file. Detail changes what a person is
+shown, never what is written.
+
+Under `short` the conversation gives the one-liners, and the details come on `explain <n>`. The review page
+stays complete under `short`, exactly as under `full` — the page is where the details live. Under
+`short+details` the review page folds each layer under one line of counts
+(`<a> of <b> probes answered by items · <c> by prose · <d> open`) and each item under its id and title
+(`dod-wbs.mjs --html <slug> --review`). A `profile.md` that cannot be read, is a directory or is not UTF-8
+gives `full` with one warning naming the cause.
 
 ## explain
 

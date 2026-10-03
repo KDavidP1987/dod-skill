@@ -189,7 +189,8 @@ export function buildReport(plan, reviews, { version = "unknown", detail = "numb
     `requested: ${n.requested}`,
     `defect: ${n.defect}`,
     `external: ${n.external}`,
-    `missed probes: ${probes.length ? probes.join(", ") : "none"}`,
+    // field-fixes D6: each missed probe carries how many design changes named it
+    `missed probes: ${probes.length ? probes.map((p) => /* ffx-mutant:missed-counts */`${p} (${n.missed[p]})`).join(", ") : "none"}`,
     `review rounds: ${rounds}`,
     `reviewer: ${reviewer}`,
     `coverage author: ${coverageOr(plan.fm.coverage_author)}`,
@@ -773,7 +774,7 @@ export async function selftest({ assertTiming = false } = {}) {
     expect("below-full", rl.body === [
       "dod version: 0.2.0", "size: M", "kind: feature", "prediction rate: 2 / (2 + 2) = 50 %", "target: 90 %", "result: below target",
       "baseline items: 2", "discovered design changes: 2", "requested: 0", "defect: 0", "external: 0",
-      "missed probes: 7.2, 12.1", "review rounds: 1", "reviewer: human",
+      "missed probes: 7.2 (1), 12.1 (1)", "review rounds: 1", "reviewer: human",
       "coverage author: 15/15 layers · 45/45 probes", "coverage reviewer: 15/15 layers · 45/45 probes",
     ].join("\n"), JSON.stringify(rl.body));
 
@@ -784,6 +785,12 @@ export async function selftest({ assertTiming = false } = {}) {
     const zero = parsePlan(planText({ items: 0, report: false }), "empty.md");
     const rz = buildReport(zero, [], { version: "0.2.0" });
     expect("zero-rate", rz.body.includes("prediction rate: 0 / (0 + 0) = none") && rz.body.includes("result: not measured") && rz.title === "dod feedback: none prediction · M feature · not measured", `${rz.title} | ${rz.body.slice(0, 120)}`);
+
+    // ffx.missed-counts (field-fixes D6): each missed probe with its count, sorted by probe; none counts nothing
+    const three = mk({ items: 2, extra: [3, 4, 5], amendments: ["- A1 · 2026-09-05 · discovered · +D3 · layer: 7.2 · one", "- A2 · 2026-09-06 · discovered · +D4 · layer: 7.2 · two", "- A3 · 2026-09-07 · discovered · +D5 · layer: 3.1 · three"] });
+    const mline = (body) => body.split("\n").find((l) => l.startsWith("missed probes: "));
+    expect("ffx.missed-counts", mline(buildReport(three.p, three.reviews, { version: "0.2.0" }).body) === "missed probes: 3.1 (1), 7.2 (2)" && mline(rz.body) === "missed probes: none",
+      JSON.stringify([mline(buildReport(three.p, three.reviews, { version: "0.2.0" }).body), mline(rz.body)]));
   }
 
   // ---- D5: reasons are opt-in, capped and scrubbed; numbers never carry free text
@@ -1107,4 +1114,7 @@ export async function selftest({ assertTiming = false } = {}) {
   return failures.length ? 1 : 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(SELF)) await main(process.argv.slice(2));
+// Run main() only when invoked directly. Both sides are realpath-resolved: a skill installed as a junction or
+// symlink invokes the script by the link's path, and a plain compare made every command a silent no-op (field-fixes D7).
+const invokedDirectly = (() => { try { return Boolean(process.argv[1]) && realpathSync(resolve(process.argv[1])) === realpathSync(SELF); } catch { return false; } })();
+if (invokedDirectly) await main(process.argv.slice(2));

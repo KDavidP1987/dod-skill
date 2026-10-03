@@ -281,3 +281,27 @@ Three more children shipped in 0.3.0 alongside the sharpened probes.
 The third test of the rubric is the plan that measures this change: a new small skill planned after these
 sentences shipped, which has to close at 90 % or better. The plan for the change itself, with its three Codex
 rounds and the owner's review, is [`dod/dod-0-3-probes.md`](dod/dod-0-3-probes.md).
+
+## What changed in 0.3.2
+
+0.3.2 is the public launch. It carries two plans built since 0.3.0, each planned, reviewed and closed with dod
+itself.
+
+**field-fixes** closed at **87 %** (33 / (33 + 5)). It fixes what people hit in real use: a plan's `recon_commit`
+is accepted; the review page shows each probe's own answer; a `VERDICT:` glued to another line is caught; a file in the wrong text encoding is named instead of misread; the scripts run through a directory
+link; a hidden or control character in a plan is reported; and a failing tool degrades to a reported fault,
+never to a pass. It also adds the **detail preference** — `full`, `short` or `short+details` in `profile.md` —
+so questions and the review page can lead with one line per item and fold the rest.
+
+**pm-views** closed at **88 %** (42 / (42 + 6)). It gives every page dod writes one look, recorded in
+`references/design.md`, and adds three pages to the two that existed: the plan page now has an overview with
+the predicted-against-observed chart, analysis, KPIs, the work breakdown with its schedule, items, amendments
+and the log; the project **dashboard** shows every plan with its rate and effort; the **self-audit** shows the
+project's health with a numbers-only block for a "Field audit" issue; and the cross-project **benchmark**
+compares every dod project under a folder. The pages are drawn by `scripts/dod-pages.mjs`, work offline and
+load nothing. `scripts/dod-effort.mjs` measures a finished work package's active time and tokens from the
+session records' times and counts only, and the pages say "not recorded" where nothing was measured.
+
+The page for pm-views itself ships as an example: [`examples/pm-views.html`](examples/pm-views.html) — one HTML
+file to download and open in a browser — beside its plan [`dod/pm-views.md`](dod/pm-views.md) and its reviews
+[`dod/pm-views.reviews.md`](dod/pm-views.reviews.md).

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="330" viewBox="0 0 1000 330" role="img">
+  <title>How dod works, in five steps</title>
+  <desc>Five steps from left to right. One, plan: fifteen layers of questions, answered before any code. Two, review: an outside reviewer checks the plan. Three, freeze: the approved plan becomes the baseline. Four, build: each item is checked with evidence, and every change is recorded with its kind. Five, close: the report says how much of the work the plan foresaw, and dod writes its pages. The plan file is the tracker from the first question to the close.</desc>
+  <rect width="1000" height="330" fill="#f4efe3"/>
+  <g font-family="'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif">
+    <g fill="#fffcf4" stroke="#e2d9c4" stroke-width="1">
+      <rect x="24" y="40" width="168" height="200"/>
+      <rect x="216" y="40" width="168" height="200"/>
+      <rect x="408" y="40" width="168" height="200"/>
+      <rect x="600" y="40" width="168" height="200"/>
+      <rect x="792" y="40" width="184" height="200"/>
+    </g>
+    <g fill="#2f8fa8">
+      <path d="M210 140 l-14 -8 v16 Z"/>
+      <path d="M402 140 l-14 -8 v16 Z"/>
+      <path d="M594 140 l-14 -8 v16 Z"/>
+      <path d="M786 140 l-14 -8 v16 Z"/>
+    </g>
+    <g font-family="Bahnschrift, 'DIN Alternate', 'Roboto Condensed', 'Arial Narrow', system-ui, sans-serif" font-size="18" font-weight="700" text-anchor="middle">
+      <circle cx="56" cy="76" r="17" fill="#2f8fa8"/><text x="56" y="82" fill="#ffffff">1</text>
+      <circle cx="248" cy="76" r="17" fill="#2f8fa8"/><text x="248" y="82" fill="#ffffff">2</text>
+      <circle cx="440" cy="76" r="17" fill="#2f8fa8"/><text x="440" y="82" fill="#ffffff">3</text>
+      <circle cx="632" cy="76" r="17" fill="#2f8fa8"/><text x="632" y="82" fill="#ffffff">4</text>
+      <circle cx="824" cy="76" r="17" fill="#2f8fa8"/><text x="824" y="82" fill="#ffffff">5</text>
+    </g>
+    <g font-family="'Sitka Heading', 'Sitka Text', 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif" font-size="26" font-weight="600" fill="#16222c">
+      <text x="82" y="85">Plan</text>
+      <text x="274" y="85">Review</text>
+      <text x="466" y="85">Freeze</text>
+      <text x="658" y="85">Build</text>
+      <text x="850" y="85">Close</text>
+    </g>
+    <g font-size="17" fill="#46525a">
+      <text x="40" y="132">Fifteen layers</text><text x="40" y="156">of questions,</text><text x="40" y="180">answered before</text><text x="40" y="204">any code</text>
+      <text x="232" y="132">An outside</text><text x="232" y="156">reviewer checks</text><text x="232" y="180">the plan</text>
+      <text x="424" y="132">The approved</text><text x="424" y="156">plan becomes</text><text x="424" y="180">the baseline</text>
+      <text x="616" y="132">Each item checked</text><text x="616" y="156">with evidence;</text><text x="616" y="180">every change</text><text x="616" y="204">recorded</text>
+      <text x="808" y="132">How much of the</text><text x="808" y="156">work the plan</text><text x="808" y="180">foresaw, and the</text><text x="808" y="204">project pages</text>
+    </g>
+    <line x1="24" y1="272" x2="976" y2="272" stroke="#c9bd9f" stroke-width="2"/>
+    <text x="24" y="304" font-size="17" fill="#46525a">One plan file is the tracker, from the first question to the close.</text>
+  </g>
+</svg>

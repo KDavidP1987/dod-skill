@@ -14,7 +14,7 @@ description: >-
 license: MIT
 metadata:
   author: SkillEra
-  version: "0.3.0"
+  version: "0.3.2"
 ---
 
 # DOD — Definition of Done
@@ -59,7 +59,10 @@ SKILL.md holds only the flow and the rules.
 | `report <slug>` | The value report: prediction rate, missed layers, completion vs baseline and vs current. |
 | `list` | Open plans with progress and warnings. |
 | `wbs [slug]` | Prints the store as a tree with baseline and now columns — runs `scripts/dod-wbs.mjs --wbs` (`--compact` off a terminal; `--export csv|md` writes `wbs.csv` / `wbs.md` under the store). |
-| `page <slug> [--review]` | Writes `<store>/<slug>.html` (or `<slug>.review.html`, the score-redacted review page) — runs `scripts/dod-wbs.mjs --html <slug> [--review]`. |
+| `page <slug> [--review]` | Writes `<store>/<slug>.html` — the plan page: overview, analysis, KPIs, work breakdown with its schedule, items, amendments, log — or `<slug>.review.html`, the score-redacted review page. Runs `scripts/dod-wbs.mjs --html <slug> [--review]`. |
+| `page --dashboard` · `page --audit` | The store's dashboard (`<store>/dod-dashboard.html`: every plan, its rate and effort) or its self-audit (`<store>/dod-audit.html`, with a numbers-only block for a "Field audit" issue). Runs `scripts/dod-wbs.mjs --html --dashboard` or `--html --audit`. |
+| `page --benchmark <dir>` | Compares every dod project up to three folders below `<dir>`: each project's rates and effort, their mean and median, and the overall figures; writes `<dir>/dod-benchmark.html` and lists what it skipped. Runs `scripts/dod-wbs.mjs --html --benchmark --roots <dir>`. |
+| `effort <slug> <W<n>.<m>\|plan>` | Measures a finished work package's active time and tokens from this folder's Claude Code session records and adds the effort note to the plan's Log — runs `scripts/dod-effort.mjs --since <iso> --until <iso> --plan <slug> --package <id>` (`--dry-run` prints it only). It reads only the times and token counts, never a message. |
 | `setup [--auto-trigger\|--manual\|--remove] [--hooks] [--git-hook] [--check]` | Creates the store, installs the pointer block (with `dod-store:`), session hook, optional pre-push hook. |
 | `explain <Dn\|An\|Fn\|question n>` | Restates one item, amendment, finding or question one level plainer than the reader's level for its technology, with an example (audience.md). Changes no file. |
 | `cancel <slug>` · `supersede <slug> --by <slug>` · `reopen <slug>` | Terminal and reverse transitions. |
@@ -79,7 +82,7 @@ the children inherit or delegates it to a named child with a constraint; gating 
 ### 1. Recon — never ask what the code can answer
 - In a repo: read the modules the feature touches, existing tests, schema, auth, routing, and any
   `docs/dod/profile.md` or related plans in `docs/dod/`. Every finding cites a path (and symbol where
-  practical). Record the commit you read.
+  practical). Record the commit you read as `recon_commit:`.
 - Read `## Audience` in `profile.md` (audience.md): it sets how the questions and the plan's prose are
   worded, per technology. A technology the recon touched that has no row is asked about **once, before
   the question batch** (the one-technology re-ask in audience.md); no section at all → the full audience
@@ -115,6 +118,10 @@ path of that plan's review page — `<store>/<slug>.review.html`, written by
 and the plan's own answer rather than only the question. Order gating probes first. Usually one round; two for `L`. If a batch goes unanswered or the user says
 "accept all recommendations", write the draft with every open decision enumerated under
 `## Assumptions` as `decision-required` (they block `ready`) — never re-ask the same batch.
+The profile's `detail` row sets how much is shown at once (audience.md › Detail): `full` as above; `short` —
+one line per question, the rest on `explain <n>`; `short+details` — numbered items, each a one-line question,
+one line of context and a `Recommended:` line, with the why, the consequences and a `Technical:` line folded
+under `Details`. The same applies to the plan summary of step 4; the plan file itself is never shortened.
 
 **`--autonomous`**: ask nothing except **blocking** gaps — gating probes and `decision-required`
 assumptions about permissions, data retention, external contracts, or irreversible choices. Fill every
@@ -256,3 +263,6 @@ something they have to remember to ask for; `setup` offers to put the sentence i
 - `references/setup.md` — store, pointer block, hooks per host, the audience question, `--check`.
 - `references/audience.md` — the four levels, where they apply and never apply, the question, `explain`.
 - `scripts/dod-index.mjs` — `node <skill>/scripts/dod-index.mjs [--dir docs/dod] [--brief | --check <slug> | --check-index | --profile | --selftest]`.
+- `references/design.md` — the one look of every page dod writes: tokens, type, charts, Do's and Don'ts.
+- `scripts/dod-wbs.mjs` — the tree, the exports and every page (`--html <slug> | --dashboard | --audit | --benchmark --roots <dir>`), drawn by `scripts/dod-pages.mjs`.
+- `scripts/dod-effort.mjs` — a work package's active time and tokens, from the session records' counts only.

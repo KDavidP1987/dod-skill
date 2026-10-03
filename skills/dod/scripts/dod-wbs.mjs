@@ -18,8 +18,15 @@ import {
 import { join, basename, dirname, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { fileURLToPath } from "node:url";
-import { loadPlans, parsePlan, checkPlan, reportNumbers, resolveStore, cleanLine, plainText, RUBRIC, ID_LEGEND } from "./dod-index.mjs";
+import { loadPlans, parsePlan, parseReviews, renderIndex, checkPlan, reportNumbers, resolveStore, cleanLine, plainText, readDetail, RUBRIC, ID_LEGEND } from "./dod-index.mjs";
+import {
+  esc, pageShell, panel, tableOf, nr, chip, pill, plural, completion, signatureChart, discoveryMap, readLayerNames, variationChart,
+  kpiRegister, effortTable, ganttChart, versionsList, NOTICE_PLAN, RENDERERS, registerRenderer, PageError, hostilePlan, offlineProblems,
+  escapeProblems, tabProblems, FIELD_AUDIT_HEADER, issueLeaks, NOTICE_BENCH, benchmarkRows, walkProjects,
+} from "./dod-pages.mjs";
 
 // ---------------------------------------------------------------- bounds (D31)
 
@@ -43,6 +50,8 @@ export const USAGE = [
   "usage: dod-wbs.mjs [--dir <store>] --wbs [--compact] [--versions <n>]",
   "       dod-wbs.mjs [--dir <store>] --export csv|md [--out <path>]",
   "       dod-wbs.mjs [--dir <store>] --html <slug> [--review] [--out <path>]",
+  "       dod-wbs.mjs [--dir <store>] --html --dashboard | --audit [--out <path>]",
+  "       dod-wbs.mjs --html --benchmark --roots <dir> [--out <path>]",
   "       dod-wbs.mjs --selftest",
 ].join("\n");
 
@@ -76,7 +85,8 @@ const fail = (key, vars) => { throw new WbsError(fmt(key, vars)); };
 // ---------------------------------------------------------------- arguments
 
 export function parseArgs(argv) {
-  const a = { dir: null, mode: null, compact: false, versions: null, format: null, slug: null, review: false, out: null };
+  const a = { dir: null, mode: null, compact: false, versions: null, format: null, slug: null, review: false, out: null, page: null, roots: null };
+  const pages = [];
   const modes = [];
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
@@ -87,7 +97,12 @@ export function parseArgs(argv) {
       case "--compact": a.compact = true; break;
       case "--versions": { const v2 = next(); if (v2 === "all") { a.versions = "all"; break; } const n = Number(v2); if (!Number.isInteger(n) || n < 1) throw new WbsError(USAGE); a.versions = n; break; }
       case "--export": modes.push("export"); a.format = next(); break;
-      case "--html": modes.push("html"); a.slug = next(); break;
+      // pm-views D14, D16, D19: `--html` names a slug, or is followed by the store or folder page it writes
+      case "--html": modes.push("html"); if (i + 1 < argv.length && !argv[i + 1].startsWith("--")) a.slug = argv[++i]; break;
+      case "--dashboard": pages.push("dashboard"); break;
+      case "--audit": pages.push("audit"); break;
+      case "--benchmark": pages.push("benchmark"); break;
+      case "--roots": a.roots = next(); break;
       case "--review": a.review = true; break;
       case "--out": a.out = next(); break;
       case "--selftest": modes.push("selftest"); break;
@@ -99,9 +114,18 @@ export function parseArgs(argv) {
   a.mode = modes[0];
   if (a.mode === "export" && !["csv", "md"].includes(a.format)) throw new WbsError(USAGE);
   if (a.review && a.mode !== "html") throw new WbsError(USAGE);
+  if ((pages.length || a.roots !== null) && a.mode !== "html") throw new WbsError(USAGE);
+  if (a.mode === "html") {
+    // exactly one page: a slug, or one of the three store and folder pages; --review only with a slug, --roots only
+    // and always with --benchmark
+    if ((a.slug !== null ? 1 : 0) + pages.length !== 1) throw new WbsError(USAGE);
+    if (a.review && a.slug === null) throw new WbsError(USAGE);
+    if ((pages[0] === "benchmark") !== (a.roots !== null)) throw new WbsError(USAGE);
+    a.page = a.slug !== null ? (a.review ? "review" : "plan") : pages[0];
+  }
   if ((a.compact || a.versions !== null) && a.mode !== "wbs") throw new WbsError(USAGE);
   // D31: the bound checks run before a single file is read
-  if (a.mode === "html" && !SLUG_RE.test(a.slug)) fail("badSlug", { slug: plainText(a.slug) });
+  if (a.mode === "html" && a.slug !== null && !SLUG_RE.test(a.slug)) fail("badSlug", { slug: plainText(a.slug) });
   if (a.out !== null && a.out.length > OUT_MAX) fail("outTooLong");
   return a;
 }
@@ -501,59 +525,27 @@ export function statusLine(command, planCount, summary, skipped) {
 // 2, *every string that reaches a surface*). Nothing is deleted — D12's exception for the pages is that they
 // escape rather than strip, so a hostile title stays readable as text.
 
-export const esc = (s) => String(s ?? "")
-  .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+// `esc` is dod-pages.mjs's: one escape for every page dod writes (pm-views Business rules 4.5). It is re-exported so
+// a caller that imported it from here keeps working.
+export { esc };
 
-// The page is one file: no `script src`, no `link href`, no font, no image, so opening it makes no request.
-const PAGE_CSS = `
-:root { color-scheme: light dark; --bg:#fbfbfa; --fg:#1b1b1a; --dim:#55534e; --line:#d9d7d1; --card:#ffffff;
-  --ok:#1b5e3a; --warn:#7a4a00; --accent:#1f4f82; }
-@media (prefers-color-scheme: dark) { :root { --bg:#16181a; --fg:#eceae5; --dim:#a8a49c; --line:#33363a;
-  --card:#1e2124; --ok:#7fd8a4; --warn:#e8b765; --accent:#8fbde8; } }
-* { box-sizing: border-box; }
-/* plan text carries long unbroken tokens — a review-page URL in a Log note, a path, a hostile string with no
-   space in it — and at 375 px one of those is what pushes the document wider than the window (D20) */
-body, p, td, th, li, caption { overflow-wrap: anywhere; }
-body { margin:0; padding:1.5rem 1rem 4rem; background:var(--bg); color:var(--fg); max-width:60rem;
-  font:16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-h1 { font-size:1.5rem; line-height:1.25; margin:0 0 .25rem; }
-h2 { font-size:1.15rem; margin:2.25rem 0 .5rem; padding-bottom:.25rem; border-bottom:1px solid var(--line); }
-h3 { font-size:1rem; margin:1.25rem 0 .35rem; color:var(--dim); }
-p { margin:.4rem 0; }
-code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.9em; }
-.sub { color:var(--dim); margin:0 0 1rem; }
-.absent { color:var(--dim); font-style:italic; }
-.legend { color:var(--dim); }
-.scroll { overflow-x:auto; }
-table { border-collapse:collapse; width:100%; min-width:32rem; }
-caption { text-align:left; color:var(--dim); padding:.25rem 0; }
-th, td { text-align:left; vertical-align:top; padding:.35rem .5rem; border-bottom:1px solid var(--line); }
-th { color:var(--dim); font-weight:600; white-space:nowrap; }
-td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-tr:target td { background:var(--card); outline:2px solid var(--accent); }
-ul.tree { list-style:none; margin:0; padding:0; }
-ul.tree li { padding:.2rem 0; border-bottom:1px solid var(--line); display:flex; gap:.5rem; flex-wrap:wrap; }
-ul.tree li span.pkg { font-weight:600; }
-ul.tree li.lvl2 { padding-left:1.25rem; }
-ul.tree li .pct { margin-left:auto; font-variant-numeric:tabular-nums; color:var(--dim); }
-a { color:var(--accent); }
-a:focus-visible { outline:3px solid var(--accent); outline-offset:2px; border-radius:2px; }
-.k { display:inline-block; min-width:5.5rem; color:var(--dim); }
-.done { color:var(--ok); } .open { color:var(--warn); }
-`.trim();
+// The styles the plan and review pages add to the shared Almanac stylesheet: class rules over its tokens only, so
+// design.md stays the one place a colour is set (pm-views D1).
+const PLAN_STYLE = `.absent{color:var(--ink-faint);font-style:italic}
+.open{color:var(--bad)}.done{color:var(--ok)}
+.stmt{display:block;color:var(--ink-muted);font-size:.86rem;margin-top:.15rem}
+ul.tree{list-style:none;margin:0;padding:0}
+ul.tree li{display:flex;flex-wrap:wrap;gap:.25rem .75rem;align-items:baseline;padding:.5rem 0;border-bottom:1px solid var(--rule)}
+ul.tree li:nth-child(5n){border-bottom-color:var(--rule-strong)}
+ul.tree li.lvl1 .pkg-t{font-weight:700}
+ul.tree li.lvl2{padding-left:1.25rem}
+ul.tree .pct{margin-left:auto;font:600 .9rem var(--f-num);color:var(--ink-muted)}
+.kinds{display:flex;flex-wrap:wrap;gap:.4rem 1.2rem;margin-bottom:.4rem}
+tr:target th,tr:target td{background:var(--selection)}`;
 
-// A section is present with its rows, or absent **with the reason it is absent** — never a silent empty block,
-// which is what D18's fixture is written to catch.
-const section = (heading, rows, reason) => `<h2>${esc(heading)}</h2>\n` + (rows && rows.length
-  ? rows.join("\n")
-  : `<p class="absent">${esc(reason)}</p>`);
-
-const table = (caption, headers, rows) => [
-  '<div class="scroll">', `<table><caption>${esc(caption)}</caption>`,
-  `<thead><tr>${headers.map((h) => `<th scope="col"${h.num ? ' class="num"' : ""}>${esc(h.text ?? h)}</th>`).join("")}</tr></thead>`,
-  `<tbody>${rows.join("")}</tbody>`, "</table>", "</div>",
-].join("\n");
+// A section is present with its content, or absent **with the reason it is absent** — never a silent empty block,
+// which is what D18's fixture is written to catch. Each one is a panel of the Almanac look (pm-views D6).
+const section = (heading, body, reason, lead = "") => panel(heading, lead, body || `<p class="absent">${esc(reason)}</p>`);
 
 // The evidence state of one item, in the checker's own terms: the last line wins, and a tick with no line at
 // all is its own state rather than being rounded to either side.
@@ -626,38 +618,81 @@ export function rateTrend(plan) {
   ];
 }
 
-export function renderPlanPage(plan) {
+// The --check numbers line's own report for this one plan (pm-views Business rules 4.2). A plan the checker cannot
+// score — no frontmatter it needs, a store-relative rule it trips — still gets its own reportNumbers, never a guess.
+function planReport(plan, reviews) {
+  try { return checkPlan({ ...plan, reviews: reviews ?? [] }, [{ ...plan, reviews: reviews ?? [] }]).report; }
+  catch { return reportNumbers(plan); }
+}
+
+// pm-views D6: the overview's three sentences, built from the numbers only — the same report the KPI register reads
+export function overviewSentences(plan, rep, c = completion(plan)) {
+  const s1 = `The plan holds ${plural(c.nowOf, "item")} now, and ${c.now} of ${c.nowOf} ${c.now === 1 ? "is" : "are"} verified.`;
+  const s2 = !rep.baseline ? "It has no baseline yet, so there is no prediction rate."
+    : rep.notStarted ? `Its baseline froze ${plural(rep.baseline, "item")}; the prediction rate is scored once the build starts.`
+    : `Its baseline froze ${plural(rep.baseline, "item")} and ${plural(rep.discoveredDesign, "design change")} ${rep.discoveredDesign === 1 ? "was" : "were"} found later, so the prediction rate is ${rep.rate} %.`;
+  const n = plan.amendments.length;
+  const kinds = KINDS.filter((k) => rep[k]).map((k) => `${rep[k]} ${k}`).join(", ");
+  const s3 = n ? `${plural(n, "amendment")} ${n === 1 ? "is" : "are"} recorded: ${kinds}.` : "No amendment has been recorded.";
+  return [s1, s2, s3];
+}
+
+const PLAN_TABS = (plan) => [
+  { id: "overview", label: "Overview" }, { id: "analysis", label: "Analysis" }, { id: "performance", label: "Performance" },
+  { id: "wbs", label: "Work breakdown" }, { id: "items", label: "Items", count: plan.items.length },
+  { id: "amendments", label: "Amendments", count: plan.amendments.length }, { id: "log", label: "Log" },
+];
+
+// pm-views D6: the plan page, in the Almanac look, from one plan file, its reviews file and the git commit times of
+// its own pass lines — nothing else in the store
+export function renderPlanPage(plan, { reviews = plan.reviews ?? null, commitTimes = null } = {}) {
   const ok = verifiedIds(plan);
   const owner = new Map();
   for (const p of plan.packages) if (p.leaf) for (const d of p.items) owner.set(d, p.id);
   const title = plan.fm.title ?? plan.slug;
+  const cut = title.indexOf(" — ");
+  const name = cut > 0 ? title.slice(0, cut) : title;
+  const dek = cut > 0 ? title.slice(cut + 3) : title;
+  const rep = planReport(plan, reviews);
+  const c = completion(plan);
   const verified = plan.items.filter((i) => ok.has(i.id)).length;
-  const rep = reportNumbers(plan);
+  const parent = plan.fm.parent && plan.fm.parent !== "none" ? plan.fm.parent : "none";
+  const status = plan.fm.status ?? "?";
 
-  const head = [
-    `<h1>${esc(title)}</h1>`,
-    `<p class="sub"><span class="mono">${esc(plan.slug)}</span> · ${esc(plan.fm.status ?? "?")} · size ${esc(plan.fm.size ?? "?")}`
-    + ` · parent ${esc(plan.fm.parent && plan.fm.parent !== "none" ? plan.fm.parent : "none")}`
-    // D6: a rate with no baseline and no design change is stated as `none`, not left out. An absent number
-    // that is simply missing reads as an oversight; the same principle D19 applies to a whole section.
-    + ` · verified ${verified}/${plan.items.length} · prediction rate ${rep.rate == null ? "none" : `${rep.rate} %`}</p>`,
-    `<p class="legend mono">${esc(ID_LEGEND)}</p>`,
-  ].join("\n");
+  // D6: a rate with no baseline and no design change is stated as `none`, not left out. An absent number
+  // that is simply missing reads as an oversight; the same principle D19 applies to a whole section.
+  const rateText = `prediction rate ${rep.rate == null ? "none" : rep.notStarted /* ffx-mutant:page-rate-na */ ? "n/a (not started)" : `${rep.rate} %`}`;
+  const state = `<span class="st big${status === "done" ? "" : " open"}">${esc(status)}</span><span>size ${esc(plan.fm.size ?? "?")}</span>`
+    + `<span>verified ${verified}/${plan.items.length}</span><span class="rate-state">${esc(rateText)}</span>`;
+
+  const date = (v) => (v && v !== "none" ? esc(v) : nr());
+  const glance = [["Status", esc(status)], ["Size", esc(plan.fm.size ?? "?")], ["Parent", esc(parent)], ["Created", date(plan.fm.created)],
+    ["Baselined", date(plan.fm.baselined)], ["Closed", date(plan.fm.closed)], ["Review", date(plan.fm.review)], ["Slug", `<span class="mono">${esc(plan.slug)}</span>`]];
+  // No template literal is nested inside another's `${}` below: the import scan's `stripLiterals` reads a template
+  // to its next backtick, so a nested one would put the scan out of step for the rest of the file (D26).
+  const story = overviewSentences(plan, rep, c).map((s) => "<p>" + esc(s) + "</p>").join("");
+  const glanceList = glance.map(([k, v]) => "<div><dt>" + esc(k) + "</dt><dd>" + v + "</dd></div>").join("");
+  const overview = `<div class="lead"><p class="dek">${esc(dek)}</p><div class="story">${story}</div></div>`
+    + panel("Predicted against observed", "The dashed line is the baseline; the solid line steps up at each design change found later; the shaded area is the verified work.", signatureChart(plan))
+    + panel("At a glance", "", `<dl class="glance">${glanceList}</dl>`);
 
   const roll = packageRollup(plan);
-  const treeRows = roll.length ? [`<ul class="tree">${roll.map((p) => {
+  const treeRows = roll.map((p) => {
     const links = p.leaf ? p.items.filter((d) => plan.items.some((i) => i.id === d)).map((d) => `<a href="#${esc(d)}">${esc(d)}</a>`).join(" ") : "";
+    const linkSpan = links ? '<span class="mono">' + links + "</span>" : "";
     return `<li class="${p.id.includes(".") ? "lvl2" : "lvl1"}"><span class="pkg mono">${esc(p.id)}</span>`
-      + `<span>${esc(p.title)}</span>${links ? `<span class="mono">${links}</span>` : ""}`
-      + `<span class="pct">${esc(p.cell.text)}</span></li>`;
-  }).join("")}</ul>`] : [];
+      + `<span class="pkg-t">${esc(p.title)}</span>${linkSpan}<span class="pct">${esc(p.cell.text)}</span></li>`;
+  });
+  const tree = roll.length ? `<ul class="tree">${treeRows.join("")}</ul>` : "";
 
   const itemRows = plan.items.map((i) => {
     const st = evidenceState(plan, i);
-    return `<tr id="${esc(i.id)}"><td class="mono">${esc(i.id)}</td><td>${esc(i.title || "—")}</td>`
+    return `<tr id="${esc(i.id)}"><th scope="row" class="mono">${esc(i.id)}</th><td>${esc(i.title || "—")}<span class="stmt">${esc(i.statement)}</span></td>`
       + `<td class="mono">${esc(i.type)}</td><td class="${st.cls}">${esc(st.text)}</td>`
       + `<td class="mono">${esc(owner.get(i.id) ?? "—")}</td></tr>`;
   });
+  const items = itemRows.length ? `<div class="tw"><table class="data"><caption>Every current item</caption><thead><tr><th scope="col">Item</th><th scope="col">Title and statement</th><th scope="col">Type</th><th scope="col">Evidence</th><th scope="col">Package</th></tr></thead><tbody>${itemRows.join("")}</tbody></table></div>`
+    + `<p class="fine mono">${esc(ID_LEGEND)}</p>` : "";
 
   const matrix = probeMatrix(plan);
   const matrixRows = matrix.rows.map((r) => {
@@ -665,54 +700,47 @@ export function renderPlanPage(plan) {
       : r.items.map((d) => `<a href="#${esc(d)}">${esc(d)}</a>`).join(" ") || '<span class="open">not mapped</span>';
     return `<tr><td class="mono">${esc(r.probe)}${r.gating ? " ⛔" : ""}</td><td>${esc(r.layer)}</td><td>${answer}</td></tr>`;
   });
-
-  const byKind = KINDS.map((k) => [k, plan.amendments.filter((a) => a.kind === k)]).filter(([, xs]) => xs.length);
-  const amendRows = byKind.map(([k, xs]) => `<h3>${esc(k)} · ${xs.length}</h3>\n` + table(
-    `${k} amendments`, ["id", "date", "layer", "ops", "package", "why"],
-    xs.map((a) => `<tr><td class="mono">${esc(a.id)}</td><td class="mono">${esc(a.date)}</td>`
-      + `<td class="mono">${esc(a.layer)}</td><td class="mono">${esc(a.ops.join(" "))}</td>`
-      + `<td class="mono">${esc(a.package ?? "—")}</td><td>${esc(a.why)}</td></tr>`),
-  ));
+  const probes = matrixRows.length ? `<div class="tw"><table class="data"><caption>Every probe of this plan's rubric</caption><thead><tr><th scope="col">Probe</th><th scope="col">Layer</th><th scope="col">Answer</th></tr></thead><tbody>${matrixRows.join("")}</tbody></table></div>` : "";
 
   const trend = rateTrend(plan);
-  const trendRows = plan.versions.length && trend.length ? [table(
-    "prediction rate by declared version", ["point", "date", { text: "baseline", num: true }, { text: "design changes", num: true }, { text: "rate", num: true }],
-    trend.map((t) => `<tr><td class="mono">${esc(t.label)}</td><td class="mono">${esc(t.date)}</td>`
-      + `<td class="num">${t.baseline}</td><td class="num">${t.changes}</td><td class="num">${t.rate} %</td></tr>`),
-  )] : [];
+  const trendTable = plan.versions.length && trend.length ? tableOf("Prediction rate by declared version", ["Point", "Date", "Baseline", "Design changes", "Rate"],
+    trend.map((t) => [`<span class="mono">${esc(t.label)}</span>`, `<span class="mono">${esc(t.date)}</span>`, String(t.baseline), String(t.changes), `${t.rate} %`]), { numeric: [2, 3, 4] }) : "";
 
-  const noteRows = plan.notes.map((n) => `<p><span class="k mono">${esc(n.date)}</span>${esc(n.text)}</p>`);
+  const kindCounts = KINDS.map((k) => [k, plan.amendments.filter((a) => a.kind === k).length]).filter(([, n]) => n);
+  const kindLine = kindCounts.map(([k, n]) => "<span>" + chip(k) + " <b>" + n + "</b></span>").join("");
+  const amendRows = plan.amendments.map((a) => {
+    const pkg = a.package ? '<span>package <span class="mono">' + esc(a.package) + "</span></span>" : "";
+    return `<li class="am" id="${esc(a.id)}"><h3>${pill(a)} ${chip(a.kind)}</h3>`
+      + `<p class="am-meta"><span class="mono">${esc(a.date)}</span><span>layer <span class="mono">${esc(a.layer)}</span></span><span class="mono">${esc(a.ops.join(" ") || "no item change")}</span>${pkg}</p>`
+      + `<p>${esc(a.why)}</p></li>`;
+  });
+  const amendments = plan.amendments.length ? `<p class="kinds">${kindLine}</p><ol class="amlist">${amendRows.join("")}</ol>` : "";
 
-  const body = [
-    head,
-    section("Work breakdown", treeRows, "this plan has no ## Work breakdown section, so there are no packages to roll up"),
-    section("Items", itemRows.length ? [table("every current item", ["id", "title", "type", "evidence", "package"], itemRows)] : [],
-      "this plan has no items in its Definition of Done"),
-    section("Probe coverage", matrixRows.length ? [table("every probe of this plan's rubric", ["probe", "layer", "answer"], matrixRows)] : [],
-      matrix.rubric === 2 ? "no Coverage row is Considered, so no probe is mapped"
+  const logLines = (plan.sections.Log ?? []).filter((l) => /^- /.test(l));
+  const logRows = logLines.map((l) => {
+    const cls = /^- \S+ · status → /.test(l) ? "tr" : /^- \S+ · D\d+ · pass · /.test(l) ? "ps" : /^- \S+ · D\d+ · fail · /.test(l) ? "fl" : "";
+    return (cls ? '<li class="' + cls + '">' : "<li>") + esc(l.slice(2)) + "</li>";
+  });
+  const log = logLines.length ? `<ul class="log">${logRows.join("")}</ul>` : "";
+
+  const panels = {
+    overview,
+    analysis: panel("Where the changes were found", "Each change by the layer it belongs to and the date it was recorded; the colour is its kind.", discoveryMap(plan, readLayerNames()))
+      + panel("Variation", "How many times a change touched items that had already changed; the size is how many items it touched.", variationChart(plan))
+      + section("Prediction rate", trendTable, plan.baseline.length ? `no version is declared in the Log, so there is no trend — the ${rateText}`
+        : "this plan has no baseline, so there is no rate to trend")
+      + section("Probe coverage", probes, matrix.rubric === 2 ? "no Coverage row is Considered, so no probe is mapped"
         : "this plan is scored by rubric 1, which maps each layer to items rather than each probe"),
-    section("Amendments", amendRows, "no amendment has been recorded against this plan"),
-    section("Prediction rate", trendRows,
-      plan.baseline.length ? `no version is declared in the Log, so there is no trend — the rate is ${rep.rate} %`
-        : "this plan has no baseline, so there is no rate to trend"),
-    section("Log notes", noteRows, "the Log holds no note lines"),
-  ].join("\n\n");
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(title)}</title>
-<style>
-${PAGE_CSS}
-</style>
-</head>
-<body>
-${body}
-</body>
-</html>
-`;
+    performance: panel("Performance and KPIs", "Each measure against its target, read from the plan's own records; a measure the records do not hold says not recorded.", kpiRegister(plan, reviews))
+      + panel("Effort", "Active time and tokens per work package, from the effort lines the builder wrote.", effortTable(plan)),
+    wbs: section("Work breakdown", tree, "this plan has no ## Work breakdown section, so there are no packages to roll up", "Each package with its items and the share of them verified.")
+      + panel("Schedule", "Planning, then each package from the end of the one before it to its last pass line.", ganttChart(plan, commitTimes ? { commitTimes } : {}))
+      + panel("Versions", "The plan's own history: draft, baseline, each declared version and each amendment.", versionsList(plan)),
+    items: section("Items", items, "this plan has no items in its Definition of Done"),
+    amendments: section("Amendments", amendments, "no amendment has been recorded against this plan"),
+    log: section("Log", log, "the plan has no Log lines"),
+  };
+  return pageShell({ title, crumb: `dod · ${plan.slug} · plan`, heading: name, state, notice: NOTICE_PLAN, tabs: PLAN_TABS(plan), panels, style: PLAN_STYLE, label: "Plan sections" });
 }
 
 // ---------------------------------------------------------------- the review page (D21, D22)
@@ -743,12 +771,19 @@ export function readLayers(file = LAYERS_MD) {
 
 // The numbered sentences of one section: `N. text` plus the indented lines that continue it. This is the plan's
 // own answer for the layer — what a reviewer is asked to judge — so it is shown whole rather than summarised.
-export function numberedSentences(plan, heading) {
+export function numberedSentences(plan, heading, layer = null) {
   const lines = plan.sections[heading] ?? [];
   const out = [];
+  // field-fixes D9: a rubric-2 plan answers its probes in `<n>.<m> — ` paragraphs; those of this layer are read
+  // with their continuation lines, up to a blank line, the next paragraph or sentence, or a heading
+  let para = null;
   for (const l of lines) {
+    const p = l.match(/^(\d+)\.(\d+) — (.+)$/);
+    if (p) { para = /* ffx-mutant:probe-paragraphs */Number(p[1]) === layer ? { n: out.length + 1, probe: `${p[1]}.${p[2]}`, text: p[3] } : null; if (para) out.push(para); continue; }
     const m = l.match(/^(\d+)\. (.+)$/);
-    if (m) { out.push({ n: Number(m[1]), text: m[2] }); continue; }
+    if (m) { para = null; out.push({ n: Number(m[1]), text: m[2] }); continue; }
+    if (!l.trim() || /^#/.test(l)) { para = null; continue; }
+    if (para) { para.text += ` ${l.trim()}`; continue; }
     if (out.length && /^\s+\S/.test(l)) out[out.length - 1].text += ` ${l.trim()}`;
   }
   return out;
@@ -775,7 +810,29 @@ export function pointerParts(pointer) {
   return { heading, entries };
 }
 
-export function renderReviewPage(plan, layers = readLayers()) {
+const FOLD_CSS = `p.fold{margin:.25rem 0;color:var(--ink-muted)}
+details{margin:.35rem 0 .75rem}
+`;
+const REVIEW_STYLE = `.absent{color:var(--ink-faint);font-style:italic}
+.open{color:var(--bad)}
+ol.said{margin:.25rem 0 .75rem;padding-left:1.25rem}
+ol.said li{padding:.15rem 0}
+.declared{border-left:3px solid var(--kind-corrected);padding:.35rem .6rem;margin:.5rem 0}
+.panel>p.mono,.panel>details>p.mono{color:var(--ink-muted);margin:.4rem 0}
+.panel>p{margin:.4rem 0}
+`;
+// the review page's tables in the shared look; the rows are the caller's, so the probe rows keep their markup
+const dataTable = (caption, headers, rows) => {
+  const head = headers.map((h) => "<th scope=\"col\">" + esc(h) + "</th>").join("");
+  return `<div class="tw"><table class="data"><caption>${esc(caption)}</caption><thead><tr>${head}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+};
+
+// field-fixes D17: under `detail · short+details` each layer shows its heading and one line of counts, with what the
+// plan says and the probe table folded under `Details`, and each item folds under its id and title. Every other
+// level renders the page exactly as before — the page is where the details live.
+export function renderReviewPage(plan, layers = readLayers(), { detail = "full" } = {}) {
+  const fold = /* ffx-mutant:detail-folded */detail === "short+details";
+  const folded = (line, inner) => `<p class="fold">${line}</p>\n<details><summary>Details</summary>\n${inner}\n</details>`;
   const rubric = plan.fm.rubric === "2" ? 2 : 1;
   const counts = RUBRIC[rubric].counts;
   const byId = new Map(plan.items.map((i) => [i.id, i]));
@@ -790,20 +847,23 @@ export function renderReviewPage(plan, layers = readLayers()) {
 
     // a layer the author declared not applicable is neither blank nor scored: the test is the claim to contest
     if (row && row.status !== "Considered" && /^N\/?A$/i.test(row.status.replace(/\s/g, ""))) {
-      out.push(`<p class="declared">declared not applicable — ${esc(stripStatusToken(row.pointer)) || "<em>no test given</em>"}</p>`);
-      out.push(table(`probes of layer ${n}`, ["probe", "what it asks", "the plan's answer"],
+      const declared = `<p class="declared">declared not applicable — ${esc(stripStatusToken(row.pointer)) || "<em>no test given</em>"}</p>`;
+      const naTable = dataTable(`probes of layer ${n}`, ["probe", "what it asks", "the plan's answer"],
         ids.map((p) => `<tr><td class="mono">${esc(p)}${layers.probes.get(p)?.gating ? " ⛔" : ""}</td>`
-          + `<td>${esc(layers.probes.get(p)?.text ?? "")}</td><td class="open">not applicable</td></tr>`)));
+          + `<td>${esc(layers.probes.get(p)?.text ?? "")}</td><td class="open">not applicable</td></tr>`));
+      if (fold) out.push(declared, `<details><summary>Details</summary>\n${naTable}\n</details>`);
+      else out.push(declared, naTable);
       blocks.push(out.join("\n"));
       continue;
     }
 
     const { heading, entries } = pointerParts(row?.pointer ?? "");
-    const said = heading ? numberedSentences(plan, heading) : [];
-    out.push(said.length
-      ? `<h3>What the plan says under “${esc(heading)}”</h3>\n<ol class="said">${said.map((s) => `<li>${esc(s.text)}</li>`).join("")}</ol>`
+    const said = heading ? numberedSentences(plan, heading, n) : [];
+    const inner = [];
+    inner.push(said.length
+      ? `<h3>What the plan says under “${esc(heading)}”</h3>\n<ol class="said">${said.map((s) => `<li>${s.probe ? `<span class="mono">${esc(s.probe)}</span> — ` : ""}${esc(s.text)}</li>`).join("")}</ol>`
       : `<p class="absent">the plan writes no numbered sentences under ${esc(heading || "any section")} for this layer</p>`);
-    out.push(table(`probes of layer ${n}`, ["probe", "what it asks", "the plan's answer"], ids.map((p) => {
+    inner.push(dataTable(`probes of layer ${n}`, ["probe", "what it asks", "the plan's answer"], ids.map((p) => {
       const e = entries.get(p);
       const answer = !e ? '<span class="open">no answer</span>'
         : e.prose !== null ? esc(e.prose)
@@ -812,6 +872,12 @@ export function renderReviewPage(plan, layers = readLayers()) {
       return `<tr><td class="mono">${esc(p)}${layers.probes.get(p)?.gating ? " ⛔" : ""}</td>`
         + `<td>${esc(layers.probes.get(p)?.text ?? "")}</td><td>${answer}</td></tr>`;
     })));
+    if (fold) {
+      const kind = (p) => { const e = entries.get(p); return !e ? "open" : e.prose !== null ? "prose" : e.items.length ? "items" : "open"; };
+      const k = { items: 0, prose: 0, open: 0 };
+      for (const p of ids) k[kind(p)]++;
+      out.push(folded(`${k.items} of ${ids.length} probes answered by items · ${k.prose} by prose · ${k.open} open`, inner.join("\n")));
+    } else out.push(...inner);
     blocks.push(out.join("\n"));
   }
 
@@ -822,50 +888,83 @@ export function renderReviewPage(plan, layers = readLayers()) {
     const lines = ev.length
       ? `<ul>${ev.map((e) => `<li class="mono">${esc(e.date)} · ${esc(e.result)} · ${esc(e.type)}: ${esc(e.detail)}</li>`).join("")}</ul>`
       : '<p class="absent">no evidence line yet</p>';
-    return `<h3 id="${esc(i.id)}"><span class="mono">${esc(i.id)}</span> ${esc(i.title || "")}</h3>\n`
-      + `<p>${esc(i.statement)}</p>\n<p class="mono">${esc(i.type)}: ${esc(i.detail)}</p>\n${lines}`;
+    const body = `<p>${esc(i.statement)}</p>\n<p class="mono">${esc(i.type)}: ${esc(i.detail)}</p>\n${lines}`;
+    if (fold) return `<details id="${esc(i.id)}"><summary><span class="mono">${esc(i.id)}</span> ${esc(i.title || "")}</summary>\n${body}\n</details>`;
+    return `<h3 id="${esc(i.id)}"><span class="mono">${esc(i.id)}</span> ${esc(i.title || "")}</h3>\n` + body;
   });
 
+  // pm-views D13: the same text as before, in the shared shell — the band holds the heading and the line under it,
+  // each layer is a panel, and the page has no tabs
   const body = [
-    `<h1>Review — ${esc(title)}</h1>`,
-    `<p class="sub"><span class="mono">${esc(plan.slug)}</span> · ${esc(plan.fm.status ?? "?")} · size ${esc(plan.fm.size ?? "?")}`
-    + ` · parent ${esc(plan.fm.parent && plan.fm.parent !== "none" ? plan.fm.parent : "none")} · ${plan.items.length} item(s)</p>`,
-    `<p class="legend mono">${esc(ID_LEGEND)}</p>`,
-    `<p class="legend">Every probe of this plan's rubric is below with the plan's own answer. The author's own`
-    + ` marking is not on this page — form your own before you look at theirs.</p>`,
-    ...blocks,
-    `<h2>Items in full</h2>`,
-    itemBlocks.length ? itemBlocks.join("\n") : '<p class="absent">this plan has no items in its Definition of Done</p>',
+    `<div class="lead"><p class="fine mono">${esc(ID_LEGEND)}</p>`,
+    `<p class="fine">Every probe of this plan's rubric is below with the plan's own answer. The author's own`
+    + ` marking is not on this page — form your own before you look at theirs.</p></div>`,
+    ...blocks.map((b) => `<section class="panel">${b}</section>`),
+    `<section class="panel"><h2>Items in full</h2>\n${itemBlocks.length ? itemBlocks.join("\n") : '<p class="absent">this plan has no items in its Definition of Done</p>'}</section>`,
   ].join("\n\n");
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Review — ${esc(title)}</title>
-<style>
-${PAGE_CSS}
-ol.said { margin:.25rem 0 .75rem; padding-left:1.25rem; }
-ol.said li { padding:.15rem 0; }
-.declared { border-left:3px solid var(--warn); padding:.35rem .6rem; margin:.5rem 0; color:var(--fg); }
-</style>
-</head>
-<body>
-${body}
-</body>
-</html>
-`;
+  const state = `<span><span class="mono">${esc(plan.slug)}</span> · ${esc(plan.fm.status ?? "?")} · size ${esc(plan.fm.size ?? "?")}`
+    + ` · parent ${esc(plan.fm.parent && plan.fm.parent !== "none" ? plan.fm.parent : "none")} · ${plan.items.length} item(s)</span>`;
+  return pageShell({ title: `Review — ${title}`, crumb: `dod · ${plan.slug} · review`, heading: `Review — ${title}`, state,
+    tabs: [{ id: "review", label: "Review" }], panels: { review: body }, style: REVIEW_STYLE + (fold ? FOLD_CSS : ""), label: "Review" });
 }
+
+// ---------------------------------------------------------------- the plan and review pages' entries (pm-views 4.5)
+
+// built from that one plan file and nothing else in the store (D18): no store snapshot, no sibling plan, no roll-up
+// borrowed from the tree — so the page a reviewer opens is the plan a reviewer was given. The plan page adds its
+// reviews file and git's commit times (pm-views D6, D11); the review page adds `references/layers.md`, which is
+// authoritative for probe text.
+function readOnePlan(dir, slug) {
+  const file = join(dir, `${slug}.md`);
+  if (!existsSync(file)) fail("noPlan", { slug: plainText(slug), dir: plainText(dir) });
+  let text;
+  try { text = readFileSync(file, "utf8"); }
+  catch (e) { fail("unreadable", { file: plainText(file), code: e.code ?? "unknown" }); }
+  const plan = parsePlan(text, file);
+  if (plan.parseErrors.length) fail("noParse", { slug: plainText(slug) });
+  return plan;
+}
+
+function readReviewsOf(dir, slug) {
+  const file = join(dir, `${slug}.reviews.md`);
+  if (!existsSync(file)) return null;
+  try { return parseReviews(readFileSync(file, "utf8")); }
+  catch (e) { fail("unreadable", { file: plainText(file), code: e.code ?? "unknown" }); }
+}
+
+registerRenderer("plan", {
+  render: (ctx) => renderPlanPage(ctx.plan, ctx),
+  context: ({ dir, slug, commitTimes }) => {
+    const plan = readOnePlan(dir, slug);
+    const reviews = readReviewsOf(dir, slug);
+    return { ctx: { plan, reviews, ...(commitTimes ? { commitTimes } : {}) }, target: join(dir, `${slug}.html`), container: dir, count: 1,
+      summary: `${plan.items.length} item(s) · ${plan.packages.length} package(s)`, skipped: 0 };
+  },
+  fixture: () => ({ plan: hostilePlan(), reviews: [], commitTimes: () => ({ error: "a fixture has no git" }) }),
+});
+
+registerRenderer("review", {
+  render: (ctx) => renderReviewPage(ctx.plan, ctx.layers ?? readLayers(), { detail: ctx.detail ?? "full" }),
+  context: ({ dir, slug }) => {
+    const plan = readOnePlan(dir, slug);
+    // field-fixes D17, D20: the store's detail level; a fault degrades to `full` and says why, once
+    const d = readDetail(dir);
+    return { ctx: { plan, layers: readLayers(), detail: d.detail }, target: join(dir, `${slug}.review.html`), container: dir, count: 1,
+      summary: `${plan.items.length} item(s) · ${RUBRIC[plan.fm.rubric === "2" ? 2 : 1].counts.reduce((x, y) => x + y, 0)} probe(s)`, skipped: 0,
+      warnings: d.warning ? [plainText(d.warning)] : [] };
+  },
+  fixture: () => ({ plan: hostilePlan(), layers: readLayers(), detail: "short+details" }),
+});
 
 // ---------------------------------------------------------------- entry
 
 // `reads` exists for D27 only, and for the same reason `beforeRename` does: the inconsistent-snapshot class is
 // the one failure class that needs the store to change between two reads, and D26 forbids a second process.
-export function main(argv, io = console, { reads = readStore } = {}) {
+export function main(argv, io = console, { reads = readStore, commitTimes = null } = {}) {
   const a = parseArgs(argv);
   if (a.mode === "selftest") return selftest(io);
-  const dir = resolveStore(a.dir);
+  // the benchmark reads a folder of projects, not a store: it resolves no store of its own
+  const dir = a.page === "benchmark" ? null : resolveStore(a.dir);
   switch (a.mode) {
     case "wbs": {
       const snap = snapshot(dir, { reads });
@@ -893,23 +992,16 @@ export function main(argv, io = console, { reads = readStore } = {}) {
       return 0;
     }
     case "html": {
-      // built from that one plan file and nothing else (D18): no store snapshot, no sibling plan, no roll-up
-      // borrowed from the tree — so the page a reviewer opens is the plan a reviewer was given. The review
-      // page adds exactly one more source, `references/layers.md`, which is authoritative for probe text.
-      const file = join(dir, `${a.slug}.md`);
-      if (!existsSync(file)) fail("noPlan", { slug: plainText(a.slug), dir: plainText(dir) });
-      let text;
-      try { text = readFileSync(file, "utf8"); }
-      catch (e) { fail("unreadable", { file: plainText(file), code: e.code ?? "unknown" }); }
-      const plan = parsePlan(text, file);
-      if (plan.parseErrors.length) fail("noParse", { slug: plainText(a.slug) });
-      const page = a.review ? renderReviewPage(plan) : renderPlanPage(plan);
-      const target = a.out ?? join(dir, `${a.slug}${a.review ? ".review" : ""}.html`);
-      writeUnderStore(dir, target, page);
-      const summary = a.review
-        ? `${plan.items.length} item(s) · ${RUBRIC[plan.fm.rubric === "2" ? 2 : 1].counts.reduce((x, y) => x + y, 0)} probe(s)`
-        : `${plan.items.length} item(s) · ${plan.packages.length} package(s)`;
-      io.log(statusLine("html", 1, summary, 0));
+      // pm-views Business rules 4.5: every page is a RENDERERS entry, so there is no page this command can write that
+      // the offline and escape tests do not render. A context failure is the page's own one line, exit 1 (D27).
+      const e = RENDERERS.get(a.page);
+      let c;
+      try { c = e.context({ dir, slug: a.slug, out: a.out, roots: a.roots, commitTimes }); }
+      catch (err) { if (err instanceof PageError) throw new WbsError(err.line, err.code); throw err; }
+      for (const w of c.warnings ?? []) io.error(w);
+      const page = e.render(c.ctx);
+      writeUnderStore(c.container, a.out ?? c.target, page);
+      io.log(statusLine("html", c.count, c.summary, c.skipped));
       return 0;
     }
     default:
@@ -1142,8 +1234,18 @@ assertion("zero.rate-none", "zero-items", (expect) => {
   const dir = makeStore({ "empty.md": planText("empty", { items: I(0), baseline: I(0) }) });
   const r = runHtml(dir, "--html", "empty");
   const page = readFileSync(join(dir, "empty.html"), "utf8");
-  expect("zero.rate-none", r.code === 0 && page.includes("prediction rate none"), JSON.stringify({ code: r.code, sub: (page.match(/<p class="sub">[^<]*/) ?? [""])[0] }));
+  expect("zero.rate-none", r.code === 0 && page.includes("prediction rate none"), JSON.stringify({ code: r.code, sub: (page.match(/<span class="rate-state">[^<]*/) ?? [""])[0] }));
   expect("zero.no-nan", !/NaN|Infinity/.test(page), (page.match(/.{0,40}(NaN|Infinity).{0,40}/) ?? [""])[0]);
+});
+
+assertion("ffx.page-rate-na", "zero-items", (expect) => {
+  // field-fixes D2: a ready plan with 10 Baseline items shows n/a on its page, never the 100 % of an empty
+  // amendment list; an in-progress plan with one discovered amendment shows its number
+  const dir = makeStore({ "r.md": planText("r", { status: "ready", items: I(10) }),
+    "g.md": planText("g", { items: I(10), amend: "- A1 · 2026-09-20 · discovered · ~D1 · layer: 4.1 · why it changed" }) });
+  const sub = (s) => { runHtml(dir, "--html", s); return (readFileSync(join(dir, `${s}.html`), "utf8").match(/<span class="rate-state">.*?<\/span>/) ?? [""])[0]; };
+  const r = sub("r"), g = sub("g");
+  expect("ffx.page-rate-na", r.includes("prediction rate n/a (not started)") && !r.includes("100 %") && /prediction rate \d+ %/.test(g), JSON.stringify({ r, g }));
 });
 
 // --- case wbs-vs-edit (D4) --------------------------------------------------
@@ -1250,7 +1352,9 @@ assertion("control.tree", "control-chars", (expect) => {
     // the control characters SURVIVE here while the tree and wbs.md strip them. That is the whole point of
     // writing the exception down, and it is only an exception if something checks that it holds — a page that
     // quietly started stripping would satisfy every other assertion in this fixture.
-    expect("control.pages", r.code === 0 && page.includes(nasty) && !/<script|[<>]2Kb/.test(page),
+    // pm-views D2: every page carries the shell's one inline script, so the check is the offline rule — exactly that
+    // script, hashed into the CSP — rather than no script at all
+    expect("control.pages", r.code === 0 && page.includes(nasty) && offlineProblems(page).length === 0 && !/[<>]2Kb/.test(page),
       `${args.join(" ")} -> ${r.code} ${JSON.stringify((page.match(/<title>[^<]*<\/title>/) ?? [""])[0])}`);
   }
   // and the whole store through the real commands, both streams: the tree lines, the status line and the
@@ -1704,8 +1808,10 @@ assertion("html.sections", "html", (expect) => {
   expect("html.exit", runHtml(dir, "--html", "full").code === 0, "the command did not exit 0");
   const page = pageOf(dir);
   const heads = [...page.matchAll(/<h2>([^<]+)<\/h2>/g)].map((m) => m[1]);
-  const want = ["Work breakdown", "Items", "Probe coverage", "Amendments", "Prediction rate", "Log notes"];
-  expect("html.every-section-present", want.every((h) => heads.includes(h)) && heads.length === want.length, JSON.stringify(heads));
+  // pm-views D6: the seven tabs' panels, in tab order; the six sections of wbs-view are among them
+  const want = ["Predicted against observed", "At a glance", "Where the changes were found", "Variation", "Prediction rate", "Probe coverage",
+    "Performance and KPIs", "Effort", "Work breakdown", "Schedule", "Versions", "Items", "Amendments", "Log"];
+  expect("html.every-section-present", JSON.stringify(heads) === JSON.stringify(want), JSON.stringify(heads));
   // present means populated: not one of them falls back to the absent paragraph on a plan that has them all
   expect("html.none-absent-on-a-full-plan", (page.match(/class="absent"/g) ?? []).length === 0,
     `${(page.match(/class="absent"/g) ?? []).length} section(s) fell back to the absent paragraph on a plan that has them all`);
@@ -1717,7 +1823,9 @@ assertion("html.sections", "html", (expect) => {
   expect("html.matrix-every-probe-once", probes.length === expected && new Set(probes).size === expected, `${probes.length} probe row(s), expected ${expected}`);
   expect("html.matrix-prose-and-unmapped", page.includes("prose: the store&#39;s own permissions cover this") && page.includes("not mapped"), "the prose answer or the unmapped probe is not shown");
   // amendments grouped by kind, each with its layer; the trend has a row per declared version
-  expect("html.amendments-by-kind", /<h3>discovered · 1<\/h3>/.test(page) && /<h3>requested · 1<\/h3>/.test(page) && page.includes("4.2"), "amendments are not grouped by kind with their layers");
+  // pm-views D6: a count per kind above the list, and each amendment with its kind and layer
+  const kindCount = (k) => new RegExp(`k-${k}"><i></i>${k}</span> <b>1</b>`).test(page);
+  expect("html.amendments-by-kind", kindCount("discovered") && kindCount("requested") && page.includes('layer <span class="mono">4.2</span>'), "amendments are not counted by kind with their layers");
   expect("html.rate-trend", page.includes("baseline") && page.includes("v1.0") && page.includes(">now<"), "the trend has no row per declared version");
   expect("html.log-notes", page.includes("the owner chose the narrow form"), "the Log note is missing");
 });
@@ -1726,8 +1834,11 @@ assertion("html.absent-with-a-reason", "html", (expect) => {
   const dir = makeStore(BARE);
   expect("html.bare-exit", runHtml(dir, "--html", "bare").code === 0, "the command did not exit 0");
   const page = pageOf(dir, "bare");
-  const blocks = [...page.matchAll(/<h2>([^<]+)<\/h2>\n<p class="absent">([^<]*)<\/p>/g)].map((m) => [m[1], m[2]]);
-  expect("html.bare-all-six-absent", blocks.length === 6, `${blocks.length} absent section(s): ${JSON.stringify(blocks.map((b) => b[0]))}`);
+  // pm-views D6: a section is a panel — heading, an optional lead, then the absent paragraph. The Log section is never
+  // absent on a parsed plan (its transitions are there), so wbs-view's six are five here
+  const blocks = [...page.matchAll(/<h2>([^<]+)<\/h2>(?:<p>[^<]*<\/p>)?<\/div><p class="absent">([^<]*)<\/p>/g)].map((m) => [m[1], m[2]]);
+  const wantAbsent = ["Prediction rate", "Probe coverage", "Work breakdown", "Items", "Amendments"];
+  expect("html.bare-all-five-absent", JSON.stringify(blocks.map((b) => b[0])) === JSON.stringify(wantAbsent), `${blocks.length} absent section(s): ${JSON.stringify(blocks.map((b) => b[0]))}`);
   // "absent" is not enough — each one says WHY, in words, so a silently empty section cannot pass as this
   expect("html.bare-each-gives-a-reason", blocks.every(([, why]) => why.trim().length >= 20), JSON.stringify(blocks));
   expect("html.bare-rubric-1-reason", blocks.some(([h, why]) => h === "Probe coverage" && why.includes("rubric 1")), JSON.stringify(blocks));
@@ -1758,9 +1869,11 @@ assertion("html.self-contained", "html", (expect) => {
   const dir = makeStore(FULL);
   runHtml(dir, "--html", "full");
   const page = pageOf(dir);
-  for (const [what, re] of [["script src", /<script/i], ["link href", /<link\b/i], ["fetch", /fetch\s*\(/], ["src attribute", /\ssrc\s*=/i], ["remote href", /href\s*=\s*"[^"#]/i]]) {
+  for (const [what, re] of [["script src", /<script\b[^>]*\bsrc\s*=/i], ["link href", /<link\b/i], ["fetch", /fetch\s*\(/], ["src attribute", /\ssrc\s*=/i], ["remote href", /href\s*=\s*"[^"#]/i]]) {
     expect(`html.no-${what.replace(/\s+/g, "-")}`, !re.test(page), `${what} appears in the page`);
   }
+  // pm-views D2: the one script the shell writes, hashed into the CSP, and no other
+  expect("html.one-script", offlineProblems(page).length === 0, offlineProblems(page).join("; "));
   // the store holds the plan and its page and nothing else — no temp file, no second target
   expect("html.writes-one-file", readdirSync(dir).sort().join(",") === "full.html,full.md", readdirSync(dir).join(","));
 });
@@ -1778,7 +1891,7 @@ assertion("html.escaping", "html", (expect) => {
   });
   expect("html.evil-exit", runHtml(dir, "--html", "evil").code === 0, "the command did not exit 0");
   const page = pageOf(dir, "evil");
-  expect("html.no-script-tag", !/<script/i.test(page), "an unescaped <script reached the page");
+  expect("html.no-script-tag", (page.match(/<script/gi) ?? []).length === 1 && offlineProblems(page).length === 0, "an unescaped <script reached the page");
   // every one of the four plan strings arrives as text, escaped, rather than being dropped
   expect("html.escaped-text", (page.match(/&lt;script&gt;alert\(1\)&lt;\/script&gt;/g) ?? []).length >= 3,
     `${(page.match(/&lt;script&gt;/g) ?? []).length} escaped occurrence(s) — title, item statement and amendment why must each survive`);
@@ -1867,6 +1980,41 @@ assertion("review.prose-answer", "review-page", (expect) => {
   expect("review.numbered-sentences", page.includes("The first rule of this plan.") && page.includes("The second rule of this plan."), "the section's numbered sentences are missing");
 });
 
+assertion("review.probe-paragraphs", "review-page", (expect) => {
+  // field-fixes D9: a rubric-2 plan's `14.1 — ` paragraph, with its continuation line, is what layer 14 shows; a
+  // `3.1 — ` paragraph under the same heading belongs to layer 3 and never to 14
+  const text = planText("pp", { fm: { rubric: "2" }, items: [{ id: "D1" }],
+    extra: `## Rollout\n14.1 — ships at once\nand is announced in the README\n3.1 — data lives in the store\n\n## Coverage\n${revCov(2, { heading: "Rollout" })}\n\n` });
+  const { r, page } = reviewPage({ "pp.md": text }, "pp");
+  const layer = (n) => page.split(`<h2 id="L${n}">`)[1]?.split("<h2 ")[0] ?? "";
+  const l14 = layer(14), l3 = layer(3);
+  expect("review.probe-paragraphs", r.code === 0 && l14.includes("ships at once and is announced in the README") && !l14.includes("no numbered sentences")
+    && !l14.includes("data lives in the store") && l3.includes("data lives in the store") && !l3.includes("ships at once"), JSON.stringify({ l14: l14.slice(0, 300), l3: l3.slice(0, 200) }));
+});
+
+assertion("review.detail-folded", "review-page", (expect) => {
+  // field-fixes D17: under short+details every layer and every item folds, nothing is dropped, and the visible line
+  // counts a layer of 3 item answers · 1 prose · 1 open; full, short and no profile render the same bytes
+  const text = planText("fd", { fm: { rubric: "2" }, items: [{ id: "D1" }, { id: "D2" }, { id: "D3" }],
+    extra: `## Business rules\n1. The first rule of this plan.\n\n## Coverage\n${revCov(2, { prose: "4.4", unanswered: "4.5", na: 6 })}\n\n` });
+  const prof = (row) => `# Project profile\n\n## Audience\n- default · working\n- asked · 2026-09-15\n${row ? `${row}\n` : ""}`;
+  const page = (row) => { const files = { "fd.md": text }; if (row !== undefined) files["profile.md"] = prof(row); return reviewPage(files, "fd"); };
+  const none = page(undefined), full = page("- detail · full"), short = page("- detail · short"), sd = page("- detail · short+details");
+  const layers = RUBRIC[2].counts.length;
+  const opened = (sd.page.match(/<details[ >]/g) ?? []).length;
+  const rows = (p) => (p.match(/<tr><td class="mono">[\s\S]*?<\/tr>/g) ?? []);
+  const l4 = sd.page.split('<h2 id="L4">')[1]?.split("<h2 ")[0] ?? "";
+  const dirStore = makeStore({ "fd.md": text }); mkdirSync(join(dirStore, "profile.md"));
+  const faulty = runHtml(dirStore, "--html", "fd", "--review");
+  expect("review.detail-folded", [none, full, short, sd].every((x) => x.r.code === 0)
+    && opened >= layers + 3 && (sd.page.match(/<details id="D[123]">/g) ?? []).length === 3
+    && JSON.stringify(rows(sd.page)) === JSON.stringify(rows(none.page)) && rows(none.page).length === allProbes(2).length
+    && l4.includes('<p class="fold">3 of 5 probes answered by items · 1 by prose · 1 open</p>')
+    && full.page === none.page && short.page === none.page && sd.page !== none.page
+    && faulty.code === 0 && faulty.err.length === 1 && faulty.err[0] === "warn: detail full — profile.md is a directory",
+    JSON.stringify({ opened, layers, rows: [rows(sd.page).length, rows(none.page).length], l4: l4.slice(0, 200), err: faulty.err, same: [full.page === none.page, short.page === none.page] }));
+});
+
 assertion("review.not-applicable", "review-page", (expect) => {
   const { page } = reviewPage({ "na.md": revPlan("na", 2, { na: 6, naTest: "the script imports no third-party module" }) }, "na");
   expect("review.na-test-shown", page.includes("declared not applicable") && page.includes("the script imports no third-party module"),
@@ -1911,17 +2059,338 @@ assertion("review.redacted", "review-page", (expect) => {
 
 assertion("review.self-contained", "review-page", (expect) => {
   const { page } = reviewPage({ "r2.md": revPlan("r2", 2, {}) }, "r2");
-  for (const [what, re] of [["script", /<script/i], ["link", /<link\b/i], ["fetch", /fetch\s*\(/], ["src", /\ssrc\s*=/i], ["remote href", /href\s*=\s*"[^"#]/i]]) {
+  for (const [what, re] of [["script", /<script\b[^>]*\bsrc\s*=/i], ["link", /<link\b/i], ["fetch", /fetch\s*\(/], ["src", /\ssrc\s*=/i], ["remote href", /href\s*=\s*"[^"#]/i]]) {
     expect(`review.no-${what.replace(/\s+/g, "-")}`, !re.test(page), `${what} appears in the review page`);
   }
+  expect("review.one-script", offlineProblems(page).length === 0, offlineProblems(page).join("; "));
   // D19 holds for this page too: plan text is escaped at the one place the surface is built
   const { page: evil } = reviewPage({ "ev.md": planText("ev", {
     title: "<script>alert(1)</script>", fm: { rubric: "2" },
     items: [{ id: "D1", stmt: 'a statement with <script>alert(1)</script> and a " quote' }],
     extra: "## Business rules\n1. A rule naming <script>alert(1)</script>.\n\n## Coverage\n" + revCov(2, {}) + "\n\n",
   }) }, "ev");
-  expect("review.escaped", !/<script/i.test(evil) && (evil.match(/&lt;script&gt;/g) ?? []).length >= 3,
+  expect("review.escaped", (evil.match(/<script/gi) ?? []).length === 1 && offlineProblems(evil).length === 0 && (evil.match(/&lt;script&gt;/g) ?? []).length >= 3,
     `${(evil.match(/&lt;script&gt;/g) ?? []).length} escaped occurrence(s)`);
+});
+
+// --- case pm-views pages (pm-views D6, D13) -----------------------------------
+
+// The review page as commit a29bb53 rendered it, kept whole as the fixture pmv.review-look compares against: the
+// restyle may change every tag and every style, and not one word a reviewer reads (D13).
+const legacyTable = (caption, headers, rows) => [
+  '<div class="scroll">', `<table><caption>${esc(caption)}</caption>`,
+  `<thead><tr>${headers.map((h) => `<th scope="col"${h.num ? ' class="num"' : ""}>${esc(h.text ?? h)}</th>`).join("")}</tr></thead>`,
+  `<tbody>${rows.join("")}</tbody>`, "</table>", "</div>",
+].join("\n");
+function reviewPageA29(plan, layers = readLayers(), { detail = "full" } = {}) {
+  const fold = detail === "short+details";
+  const folded = (line, inner) => `<p class="fold">${line}</p>\n<details><summary>Details</summary>\n${inner}\n</details>`;
+  const rubric = plan.fm.rubric === "2" ? 2 : 1;
+  const counts = RUBRIC[rubric].counts;
+  const byId = new Map(plan.items.map((i) => [i.id, i]));
+  const title = plan.fm.title ?? plan.slug;
+
+  const blocks = [];
+  for (let n = 1; n <= counts.length; n++) {
+    const row = plan.coverage.find((r) => r.n === n);
+    const name = row?.layer ?? layers.names.get(n) ?? `Layer ${n}`;
+    const ids = Array.from({ length: counts[n - 1] }, (_, i) => `${n}.${i + 1}`);
+    const out = [`<h2 id="L${n}">${esc(n)}. ${esc(name)}</h2>`];
+
+    // a layer the author declared not applicable is neither blank nor scored: the test is the claim to contest
+    if (row && row.status !== "Considered" && /^N\/?A$/i.test(row.status.replace(/\s/g, ""))) {
+      const declared = `<p class="declared">declared not applicable — ${esc(stripStatusToken(row.pointer)) || "<em>no test given</em>"}</p>`;
+      const naTable = legacyTable(`probes of layer ${n}`, ["probe", "what it asks", "the plan's answer"],
+        ids.map((p) => `<tr><td class="mono">${esc(p)}${layers.probes.get(p)?.gating ? " ⛔" : ""}</td>`
+          + `<td>${esc(layers.probes.get(p)?.text ?? "")}</td><td class="open">not applicable</td></tr>`));
+      if (fold) out.push(declared, `<details><summary>Details</summary>\n${naTable}\n</details>`);
+      else out.push(declared, naTable);
+      blocks.push(out.join("\n"));
+      continue;
+    }
+
+    const { heading, entries } = pointerParts(row?.pointer ?? "");
+    const said = heading ? numberedSentences(plan, heading, n) : [];
+    const inner = [];
+    inner.push(said.length
+      ? `<h3>What the plan says under “${esc(heading)}”</h3>\n<ol class="said">${said.map((s) => `<li>${s.probe ? `<span class="mono">${esc(s.probe)}</span> — ` : ""}${esc(s.text)}</li>`).join("")}</ol>`
+      : `<p class="absent">the plan writes no numbered sentences under ${esc(heading || "any section")} for this layer</p>`);
+    inner.push(legacyTable(`probes of layer ${n}`, ["probe", "what it asks", "the plan's answer"], ids.map((p) => {
+      const e = entries.get(p);
+      const answer = !e ? '<span class="open">no answer</span>'
+        : e.prose !== null ? esc(e.prose)
+        : e.items.length ? e.items.map((d) => (byId.has(d) ? `<a href="#${esc(d)}">${esc(d)}</a>` : `${esc(d)} <span class="open">(not an item of this plan)</span>`)).join(" ")
+        : '<span class="open">no answer</span>';
+      return `<tr><td class="mono">${esc(p)}${layers.probes.get(p)?.gating ? " ⛔" : ""}</td>`
+        + `<td>${esc(layers.probes.get(p)?.text ?? "")}</td><td>${answer}</td></tr>`;
+    })));
+    if (fold) {
+      const kind = (p) => { const e = entries.get(p); return !e ? "open" : e.prose !== null ? "prose" : e.items.length ? "items" : "open"; };
+      const k = { items: 0, prose: 0, open: 0 };
+      for (const p of ids) k[kind(p)]++;
+      out.push(folded(`${k.items} of ${ids.length} probes answered by items · ${k.prose} by prose · ${k.open} open`, inner.join("\n")));
+    } else out.push(...inner);
+    blocks.push(out.join("\n"));
+  }
+
+  // the items the probes link to, each with its full statement and its evidence, so a link lands on the thing
+  // the reviewer needs rather than on an id
+  const itemBlocks = plan.items.map((i) => {
+    const ev = plan.evidence.filter((e) => e.id === i.id);
+    const lines = ev.length
+      ? `<ul>${ev.map((e) => `<li class="mono">${esc(e.date)} · ${esc(e.result)} · ${esc(e.type)}: ${esc(e.detail)}</li>`).join("")}</ul>`
+      : '<p class="absent">no evidence line yet</p>';
+    const body = `<p>${esc(i.statement)}</p>\n<p class="mono">${esc(i.type)}: ${esc(i.detail)}</p>\n${lines}`;
+    if (fold) return `<details id="${esc(i.id)}"><summary><span class="mono">${esc(i.id)}</span> ${esc(i.title || "")}</summary>\n${body}\n</details>`;
+    return `<h3 id="${esc(i.id)}"><span class="mono">${esc(i.id)}</span> ${esc(i.title || "")}</h3>\n` + body;
+  });
+
+  const body = [
+    `<h1>Review — ${esc(title)}</h1>`,
+    `<p class="sub"><span class="mono">${esc(plan.slug)}</span> · ${esc(plan.fm.status ?? "?")} · size ${esc(plan.fm.size ?? "?")}`
+    + ` · parent ${esc(plan.fm.parent && plan.fm.parent !== "none" ? plan.fm.parent : "none")} · ${plan.items.length} item(s)</p>`,
+    `<p class="legend mono">${esc(ID_LEGEND)}</p>`,
+    `<p class="legend">Every probe of this plan's rubric is below with the plan's own answer. The author's own`
+    + ` marking is not on this page — form your own before you look at theirs.</p>`,
+    ...blocks,
+    `<h2>Items in full</h2>`,
+    itemBlocks.length ? itemBlocks.join("\n") : '<p class="absent">this plan has no items in its Definition of Done</p>',
+  ].join("\n\n");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review — ${esc(title)}</title>
+<style>
+ol.said { margin:.25rem 0 .75rem; padding-left:1.25rem; }
+ol.said li { padding:.15rem 0; }
+.declared { border-left:3px solid var(--warn); padding:.35rem .6rem; margin:.5rem 0; color:var(--fg); }
+</style>
+</head>
+<body>
+${body}
+</body>
+</html>
+`;
+}
+
+// What a reader sees: no tags, no style, no script, no whitespace — and none of the shell's own furniture (the crumb
+// above the heading and the footer line), which is the restyle, not the review
+export const visibleText = (html) => String(html)
+  .replace(/<p class="crumb">[\s\S]*?<\/p>/, "").replace(/<footer[\s\S]*?<\/footer>/, "")
+  .replace(/<(style|script|title)\b[^>]*>[\s\S]*?<\/\1>/g, "").replace(/<[^>]+>/g, "").replace(/\s+/g, "");
+
+const REVIEWS_ONE = "## Review 1 · 2026-09-19 · codex · plan commit abc1234\n\nVERDICT: READY\n";
+
+assertion("pmv.plan-page", "html", (expect) => {
+  const dir = makeStore({ ...FULL, "full.reviews.md": REVIEWS_ONE });
+  const r = runHtml(dir, "--html", "full");
+  const page = pageOf(dir);
+  const plan = parsePlan(readFileSync(join(dir, "full.md"), "utf8"), join(dir, "full.md"));
+  expect("pmv.plan-page.exit", r.code === 0 && r.out.at(-1) === "html: 1 plan(s) · 3 item(s) · 3 package(s)", JSON.stringify(r));
+  // the seven tabs, in order, with the item and amendment counts the plan holds
+  const tabs = [...page.matchAll(/<button role="tab" id="tab-([^"]+)"[^>]*>([^<]*)(?: <span class="cnt">(\d+)<\/span>)?<\/button>/g)].map((m) => [m[1], m[2], m[3] ?? null]);
+  expect("pmv.plan-page.tabs", JSON.stringify(tabs) === JSON.stringify([["overview", "Overview", null], ["analysis", "Analysis", null], ["performance", "Performance", null],
+    ["wbs", "Work breakdown", null], ["items", "Items", String(plan.items.length)], ["amendments", "Amendments", String(plan.amendments.length)], ["log", "Log", null]]), JSON.stringify(tabs));
+  expect("pmv.plan-page.shell", tabProblems(page).length === 0 && offlineProblems(page).length === 0 && escapeProblems(page).length === 0,
+    [...tabProblems(page), ...offlineProblems(page), ...escapeProblems(page)].join("; "));
+  // the three sentences name only numbers the report holds: every number in them is one of the report's
+  const rep = reportNumbers(plan);
+  const story = ((page.match(/<div class="story">([\s\S]*?)<\/div>/) ?? [])[1] ?? "").replace(/<[^>]+>/g, " ");
+  const allowed = new Set([plan.items.length, verifiedIds(plan).size, rep.baseline, rep.discoveredDesign, rep.rate, plan.amendments.length,
+    ...KINDS.map((k) => rep[k])].map(String));
+  const named = story.match(/\d+/g) ?? [];
+  expect("pmv.plan-page.sentences", (story.match(/<p>/g) ?? []).length === 0 && /holds 3 items now, and 1 of 3 is verified/.test(story)
+    && story.includes(`prediction rate is ${rep.rate} %`) && named.length >= 5 && named.every((n) => allowed.has(n)), JSON.stringify({ story, named, rate: rep.rate }));
+  // the reviews file beside the plan is read: one round before the baseline, first READY by codex
+  expect("pmv.plan-page.reviews", /data-kpi="rounds"><th scope="row">[^<]*<\/th><td class="v">1<\/td><td class="a">first READY by codex/.test(page),
+    (page.match(/data-kpi="rounds">[\s\S]*?<\/tr>/) ?? [""])[0]);
+  expect("pmv.plan-page.glance", ["Status", "Size", "Parent", "Created", "Baselined", "Closed", "Review"].every((k) => page.includes(`<dt>${k}</dt>`)) && page.includes(esc(NOTICE_PLAN)),
+    "At a glance or the notice is missing");
+  // nothing else in the store: a sibling plan changes not one byte of this page
+  writeFileSync(join(dir, "other.md"), planText("other", { title: "A sibling", items: I(4), log: passes(["D1", "D2"]) }));
+  runHtml(dir, "--html", "full");
+  expect("pmv.plan-page.one-plan", pageOf(dir) === page, "the page changed when a sibling plan was added to the store");
+  // the one-line description is the title after " — ", and the heading the part before it
+  const d2 = makeStore({ "dash.md": planText("dash", { title: "Field fixes — the gaps the field found", items: I(1) }) });
+  runHtml(d2, "--html", "dash");
+  const dash = pageOf(d2, "dash");
+  expect("pmv.plan-page.dek", dash.includes("<h1>Field fixes</h1>") && dash.includes('<p class="dek">the gaps the field found</p>'), (dash.match(/<h1>[\s\S]*?<\/h1>|<p class="dek">[^<]*/g) ?? []).join(" | "));
+});
+
+assertion("pmv.review-look", "review-page", (expect) => {
+  const text = planText("fd", { fm: { rubric: "2" }, items: [{ id: "D1" }, { id: "D2" }, { id: "D3" }],
+    extra: `## Business rules\n1. The first rule of this plan.\n\n## Coverage\n${revCov(2, { prose: "4.4", unanswered: "4.5", na: 6 })}\n\n` });
+  const layers = readLayers();
+  for (const [name, plan, detail] of [["full", parsePlan(text, "fd.md"), "full"], ["folded", parsePlan(text, "fd.md"), "short+details"],
+    ["rubric-1", parsePlan(revPlan("r1", 1, {}), "r1.md"), "full"], ["hostile", hostilePlan(), "full"]]) {
+    const now = renderReviewPage(plan, layers, { detail }), then = reviewPageA29(plan, layers, { detail });
+    expect(`pmv.review-look.${name}-text`, visibleText(now) === visibleText(then), (() => { const x = visibleText(now), y = visibleText(then); if (x === y) return "same"; let k = 0; while (k < Math.min(x.length, y.length) && x[k] === y[k]) k++; return `differs at ${k}: now ${x.slice(k, k + 60)} | then ${y.slice(k, k + 60)}`; })());
+    expect(`pmv.review-look.${name}-shell`, offlineProblems(now).length === 0 && now.includes("--band:") && !REDACTED.some((w) => now.includes(w) && !then.includes(w)),
+      offlineProblems(now).join("; "));
+  }
+  // the comparison is not vacuous: a changed word is a difference
+  const p = parsePlan(text, "fd.md");
+  expect("pmv.review-look.control", visibleText(renderReviewPage(p, layers).replace("The first rule", "The 1st rule")) !== visibleText(reviewPageA29(p, layers)));
+});
+
+// --- case pm-views store pages (pm-views D14, D16, D17, D18) ---------------------
+
+// a done plan whose rate is baseline / (baseline + design changes): 4 + 1 is 80 %, 9 + 1 is 90 %, 3 + 0 is 100 %
+const donePlanText = (slug, base, changes, o = {}) => planText(slug, {
+  title: o.title ?? slug, status: "done", items: I(base + changes), baseline: I(base),
+  amend: changes ? Array.from({ length: changes }, (_, k) => `- A${k + 1} · 2026-09-19 · discovered · +D${base + k + 1} · layer: 6.1 · the plan missed it`).join("\n") : "",
+  log: passes(I(base + changes).map((i) => i.id)) + "- 2026-09-20 · status → done · close\n",
+  extra: o.extra ?? "## Report\nPrediction rate written.\n\n",
+});
+const htmlOut = (dir, file) => readFileSync(join(dir, file), "utf8");
+// a full collection on demand, without --expose-gc on the command line or a child process (pm-views A5)
+const collector = () => { setFlagsFromString("--expose-gc"); const gc = runInNewContext("gc"); setFlagsFromString("--no-expose-gc"); return gc; };
+
+assertion("pmv.dashboard", "html", (expect) => {
+  const dir = makeStore({ "a.md": donePlanText("a", 4, 1), "b.md": donePlanText("b", 9, 1), "c.md": donePlanText("c", 3, 0),
+    "d.md": planText("d", { status: "draft", items: I(2), baseline: [], fm: { baselined: "none" } }) });
+  const r = runHtml(dir, "--html", "--dashboard");
+  expect("pmv.dashboard.exit", r.code === 0 && r.out.at(-1) === "html: 4 plan(s) · 3 done", JSON.stringify(r));
+  const page = htmlOut(dir, "dod-dashboard.html");
+  const rateRow = (page.match(/<tr><th scope="row">Prediction rate<\/th><td>([^]*?)<\/td>/) ?? [])[1] ?? "";
+  expect("pmv.dashboard.mean-median", rateRow.startsWith("90 % · 90 % ") && rateRow.includes("n 3"), rateRow);
+  const tabs = [...page.matchAll(/<button role="tab" id="tab-([^"]+)"/g)].map((m) => m[1]).join(",");
+  expect("pmv.dashboard.tabs", tabs === "overview,plans,analysis,effort" && tabProblems(page).length === 0 && offlineProblems(page).length === 0, tabs);
+  const plans = (page.split('id="p-plans"')[1] ?? "").split('id="p-analysis"')[0];
+  expect("pmv.dashboard.draft-listed", ["a", "b", "c", "d"].every((s) => plans.includes(`<span class="mono">${s}</span>`)), "a plan is missing from the Plans tab");
+  // an empty store is a page that says so, not a failure and not a page of zeros
+  const empty = makeStore({});
+  const e = runHtml(empty, "--html", "--dashboard");
+  expect("pmv.dashboard.empty", e.code === 0 && htmlOut(empty, "dod-dashboard.html").includes("no plans yet"), JSON.stringify(e));
+  expect("pmv.dashboard.not-with-slug", (() => { try { parseArgs(["--html", "a", "--dashboard"]); return false; } catch (x) { return x.line === USAGE; } })()
+    && (() => { try { parseArgs(["--html", "--dashboard", "--review"]); return false; } catch (x) { return x.line === USAGE; } })()
+    && (() => { try { parseArgs(["--html", "--audit", "--roots", "x"]); return false; } catch (x) { return x.line === USAGE; } })(), "a second page or a stray flag was accepted");
+});
+
+assertion("pmv.audit", "html", (expect) => {
+  // b is done with an empty Report — one planted --check problem
+  // slugs of several letters: the leak scan withholds a block that holds any slug, and a one-letter slug is in every block
+  const dir = makeStore({ "alpha.md": donePlanText("alpha", 3, 0), "bravo.md": donePlanText("bravo", 3, 0, { extra: "## Report\n\n" }), "oscar.md": planText("oscar", { items: I(2) }) });
+  const r = runHtml(dir, "--html", "--audit");
+  const page = htmlOut(dir, "dod-audit.html");
+  expect("pmv.audit.exit", r.code === 0 && r.out.at(-1) === "html: 3 plan(s) · index stale", JSON.stringify(r));
+  const rowOf = (slug) => (page.match(new RegExp(`<tr><th scope="row"><span class="mono">${slug}</span></th>[^]*?</tr>`)) ?? [""])[0];
+  // bravo is alpha with its Report emptied: exactly one more problem, and its report reads missing
+  const problems = (slug) => Number((rowOf(slug).match(/<td class="n"><span class="(?:bad)?">(\d+)<\/span>/) ?? [])[1]);
+  expect("pmv.audit.problem", problems("bravo") === problems("alpha") + 1 && rowOf("bravo").includes("missing") && rowOf("alpha").includes("written"), rowOf("alpha") + " | " + rowOf("bravo"));
+  expect("pmv.audit.stale", page.includes("stale or missing"), "a store without an index read fresh");
+  expect("pmv.audit.block", page.includes('<pre class="issue">') && page.includes(esc(FIELD_AUDIT_HEADER)), "the Markdown block is missing");
+  // write the index the renderer would write, and the same store reads fresh
+  writeFileSync(join(dir, "README.md"), renderIndex(RENDERERS.get("audit").context({ dir }).ctx.plans.map((p) => (p.reviews ? p : { ...p, reviews: [] })), dir));
+  const f = runHtml(dir, "--html", "--audit");
+  expect("pmv.audit.fresh", f.out.at(-1) === "html: 3 plan(s) · index fresh" && htmlOut(dir, "dod-audit.html").includes(">fresh<"), JSON.stringify(f.out));
+});
+
+assertion("pmv.numbers-only", "html", (expect) => {
+  const root = tempDir("dod-wbs-acme-");
+  const dir = join(root, "acme-client", "docs", "dod");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "acme-payroll.md"), donePlanText("acme-payroll", 4, 1, { title: "Acme payroll export" }));
+  const r = runHtml(dir, "--html", "--audit");
+  const page = htmlOut(dir, "dod-audit.html");
+  const block = (page.match(/<pre class="issue">([^]*?)<\/pre>/) ?? [])[1] ?? "";
+  const bad = ["Acme payroll export", "acme-client", "acme-payroll", root, "@"].filter((s) => block.includes(esc(s)) || block.includes(s));
+  expect("pmv.numbers-only", r.code === 0 && block.includes("| Plan 1 |") && block.includes("Project 1") && bad.length === 0, JSON.stringify({ bad, block: block.slice(0, 200) }));
+  const health = (page.split('id="p-health"')[1] ?? "").split('id="p-issue"')[0];
+  expect("pmv.numbers-only.health-names", health.includes('<span class="mono">acme-payroll</span>'), "the Health tab lost the real slug");
+  // the scan is what withholds a block: one that does carry a name is caught
+  expect("pmv.numbers-only.plant", issueLeaks("Plan 1 is Acme payroll export", [{ slug: "acme-payroll", title: "Acme payroll export" }], "acme-client").length > 0
+    && issueLeaks("Plan 1 · <home>/x · a@" + "b.example", [], "").length > 0, "a block carrying a title or an e-mail passed the scan");
+});
+
+// --- case pm-views benchmark (pm-views D19, D20) ----------------------------------
+
+// a project: a folder whose docs/dod holds the given plan files
+const project = (root, rel, files) => {
+  const store = join(root, ...rel.split("/"), "docs", "dod");
+  mkdirSync(store, { recursive: true });
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(store, name), text);
+  return join(root, ...rel.split("/"));
+};
+const skippedOf = (page) => [...((page.split('id="p-skipped"')[1] ?? "").matchAll(/<tr><th scope="row">([^<]*)<\/th><td>([^<]*)<\/td><\/tr>/g))].map((m) => `${m[1]} — ${m[2]}`);
+
+assertion("pmv.bench", "html", (expect) => {
+  const root = tempDir("dod-wbs-bench-"), outside = tempDir("dod-wbs-out-");
+  project(root, "p1", { "a.md": donePlanText("alpha", 4, 1), "b.md": donePlanText("bravo", 3, 0) });   // 80 %, 100 %
+  project(root, "a/b/p3", { "c.md": donePlanText("charlie", 3, 1) });                                  // 75 %
+  project(root, "c/d/e/p4", { "d.md": donePlanText("delta", 3, 0) });
+  project(root, "node_modules/pn", { "e.md": donePlanText("echo", 3, 0) });
+  project(root, ".hidden/ph", { "f.md": donePlanText("foxtrot", 3, 0) });
+  project(outside, "pl", { "g.md": donePlanText("golf", 3, 0) });
+  let linked = true;
+  try { symlinkSync(join(outside, "pl"), join(root, "linked"), "junction"); } catch { linked = false; }
+  const r = runHtml(root, "--html", "--benchmark", "--roots", root);
+  const page = r.code === 0 ? readFileSync(join(root, "dod-benchmark.html"), "utf8") : "";
+  expect("pmv.bench.exit", r.code === 0 && r.out.at(-1) === "html: 3 plan(s) · 2 project(s) · " + skippedOf(page).length + " skipped", JSON.stringify(r.out ?? r.line));
+  const projects = [...((page.split('id="p-projects"')[1] ?? "").split('id="p-plans"')[0].matchAll(/<th scope="col">([^<]*)<\/th>/g))].map((m) => m[1]);
+  expect("pmv.bench.found", JSON.stringify(projects) === JSON.stringify(["Measure", "a/b/p3", "p1", "All projects"]), JSON.stringify(projects));
+  const sk = skippedOf(page);
+  const want = ["c/d/e — not searched below depth 3", "node_modules — node_modules", ".hidden — a hidden folder", ...(linked ? ["linked — a link — not followed"] : [])];
+  expect("pmv.bench.skipped", want.every((w) => sk.includes(w)) && !sk.some((s) => s.startsWith("c/d/e/p4")), JSON.stringify(sk));
+  // overall over the three done plans: 80, 100, 75 → mean 85, median 80
+  const overall = ((page.split('id="p-overview"')[1] ?? "").match(/<tr><th scope="row">Prediction rate<\/th><td>([^]*?)<\/td>/) ?? [])[1] ?? "";
+  expect("pmv.bench.overall", overall.startsWith("85 % · 80 % ") && overall.includes("n 3"), overall);
+  expect("pmv.bench.notice", page.includes(`<p class="notice">${esc(NOTICE_BENCH)}</p>`) && offlineProblems(page).length === 0 && tabProblems(page).length === 0, "the first line or the shell is missing");
+  expect("pmv.bench.link-tested", linked, "this host could not make a junction, so the link case did not run");
+});
+
+assertion("pmv.bench-faults", "html", (expect) => {
+  const root = tempDir("dod-wbs-bfault-"), outside = tempDir("dod-wbs-bout-");
+  project(root, "good", { "a.md": donePlanText("alpha", 4, 1) });
+  const unread = join(root, "unread", "docs"); mkdirSync(unread, { recursive: true }); writeFileSync(join(unread, "dod"), "a file where the store should be");
+  project(root, "broken", { "x.md": "---\ndod: 2\nslug: broken\n" });
+  const away = join(root, "away"); mkdirSync(away); writeFileSync(join(away, "CLAUDE.md"), "dod-store: ../../" + basename(outside) + "\n");
+  project(outside, "", { "o.md": donePlanText("oscar", 3, 0) });
+  const split = join(root, "split"); mkdirSync(split); writeFileSync(join(split, "CLAUDE.md"), "dod-store: docs/a\n"); writeFileSync(join(split, "AGENTS.md"), "dod-store: docs/b\n");
+  const r = runHtml(root, "--html", "--benchmark", "--roots", root);
+  const page = r.code === 0 ? readFileSync(join(root, "dod-benchmark.html"), "utf8") : "";
+  const sk = skippedOf(page);
+  const want = ["unread — its store cannot be read", "broken/x.md — does not parse", "away — its store is outside the folder", "split — its instruction files name different stores"];
+  expect("pmv.bench-faults.listed", r.code === 0 && want.every((w) => sk.includes(w)) && page.includes("alpha"), JSON.stringify({ code: r.code, line: r.line, sk }));
+  // --out outside the folder is refused and writes nothing
+  const o = runHtml(root, "--html", "--benchmark", "--roots", root, "--out", join(root, "..", "x-bench.html"));
+  expect("pmv.bench-faults.out", o.code === 1 && !existsSync(join(root, "..", "x-bench.html")), JSON.stringify(o));
+  // a store swapped for a link after the walk and before its read is not read
+  const swapRoot = tempDir("dod-wbs-bswap-");
+  const sw = project(swapRoot, "sw", { "a.md": donePlanText("alpha", 4, 1) });
+  project(outside, "elsewhere", { "z.md": donePlanText("zulu", 3, 0) });
+  const b = benchmarkRows(swapRoot, { between: () => { rmSync(join(sw, "docs", "dod"), { recursive: true, force: true }); symlinkSync(join(outside, "elsewhere", "docs", "dod"), join(sw, "docs", "dod"), "junction"); } });
+  expect("pmv.bench-faults.swap", b.plans === 0 && b.skipped.some((s) => s.path === "sw" && s.reason === "moved outside the folder"), JSON.stringify(b.skipped));
+  // the 201st project is never read
+  const many = tempDir("dod-wbs-bmany-");
+  const tiny = donePlanText("tiny", 1, 0);
+  for (let k = 0; k < 201; k++) project(many, `p${String(k).padStart(3, "0")}`, { "a.md": tiny });
+  const m = benchmarkRows(many);
+  expect("pmv.bench-faults.limit", m.projects.length === 200 && m.stopped === "200 projects" && !m.projects.some((p) => p.name === "p200"), JSON.stringify({ n: m.projects.length, stopped: m.stopped }));
+  const mr = runHtml(many, "--html", "--benchmark", "--roots", many);
+  expect("pmv.bench-faults.limit-said", mr.code === 0 && mr.out.at(-1).includes("stopped at the limit of 200 projects")
+    && readFileSync(join(many, "dod-benchmark.html"), "utf8").includes("stopped at the limit of 200 projects"), JSON.stringify(mr.out));
+  // an empty root, and a root that does not exist, exit 1 with one line
+  const e = runHtml(root, "--html", "--benchmark", "--roots", tempDir("dod-wbs-bempty-"));
+  const n = runHtml(root, "--html", "--benchmark", "--roots", join(root, "no-such-folder"));
+  expect("pmv.bench-faults.empty", e.code === 1 && /^wbs: no dod project below /.test(e.line ?? "") && n.code === 1 && /^wbs: no folder /.test(n.line ?? ""), JSON.stringify([e.line, n.line]));
+  // 500 plans of 200 KB (100 MB): the heap grows by less than 64 MB, because a plan is dropped once its row is kept
+  const big = tempDir("dod-wbs-bbig-");
+  const pad = Array.from({ length: 2600 }, (_, k) => `- 2026-09-19 · note · padding line ${k} ${"x".repeat(40)}`).join("\n") + "\n";
+  const fat = donePlanText("fat", 3, 0).replace("## Log\n", "## Log\n" + pad);
+  const store = join(big, "p", "docs", "dod"); mkdirSync(store, { recursive: true });
+  for (let k = 0; k < 500; k++) writeFileSync(join(store, `f${k}.md`), fat.replace("slug: fat", `slug: f${k}`));
+  // pm-views A5: measured after a forced collection, so the plan text already dropped is not counted as growth
+  const gc = collector();
+  gc();
+  const before = process.memoryUsage().heapUsed;
+  let peak = before, seen = 0;
+  const res = benchmarkRows(big, { onPlan: () => { if (++seen % 50 === 0) { gc(); peak = Math.max(peak, process.memoryUsage().heapUsed); } } });
+  expect("pmv.bench-faults.heap", res.plans === 500 && Buffer.byteLength(fat) >= 200_000 && peak - before < 64 * 1024 * 1024,
+    `${res.plans} plans of ${Buffer.byteLength(fat)} B, heap grew ${Math.round((peak - before) / 1048576)} MB`);
 });
 
 // --- case failure-classes (D27) ----------------------------------------------

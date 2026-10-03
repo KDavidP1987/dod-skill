@@ -115,6 +115,11 @@ listed (none for `none yet`) — so nothing listed is ever asked again:
 - anything else → show the forms once more; a second unusable answer is `skip`
 - `keep it out of git` → add `docs/dod/profile.md` to `.gitignore` (shown first), then write as usual
 
+In the same message, right after the levels question, ask the **detail** question — how much to show at
+once: `full`, `short` or `short+details` (`references/audience.md` › Detail has the text verbatim, the token
+cost of each and the `short+details` format). `detail <value>` adds the row `- detail · <value>` to the
+section; no answer leaves `full` and writes no row.
+
 Show the exact section **before** writing it — print the block below as a message, then make the tool call
 that writes the file; never write first and show afterwards (the answer was the confirmation, so no second
 "yes" is needed) — and write only that section:

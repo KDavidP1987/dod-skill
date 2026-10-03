@@ -22,7 +22,7 @@ parent: none
 created: 2026-09-14
 baselined: none
 closed: none
-commit: 3f2a9c1
+recon_commit: 3f2a9c1
 coverage_author: 14/14 layers · 42/42 probes
 coverage_reviewer: pending
 review: pending
@@ -41,7 +41,7 @@ review: pending
 | `created` | date | |
 | `baselined` | date or `none` | set by `approve`; **kept** if the plan is later cancelled or superseded |
 | `closed` | date or `none` | set exactly for `done` / `cancelled` / `superseded` |
-| `commit` | repo commit the recon read, or `none` | |
+| `recon_commit` | repo commit the recon read, or `none` | written `commit` before dod 0.3.1, still read; both at once is a problem |
 | `coverage_author` | `a/b layers · c/d probes` or `pending` | applicable layers and probes only (N/A excluded); must equal the Coverage table from `ready` on |
 | `coverage_reviewer` | same shape or `pending` | must equal the latest READY review's coverage line from `ready` on |
 | `review` | `pending` `codex` `subagent` `human` | never `self`; must name the reviewer of the latest READY review |
@@ -146,7 +146,7 @@ Separator is ` · ` (space, U+00B7 middle dot, space). Never use `·` inside a f
 |---|---|---|
 | DoD item | `- [ ] Dn · **title** statement · type: detail` | `type` ∈ `test` `cmd` `file` `manual`; `[x]` = checked; IDs never reused; the title is required at `dod: 2` (ID legend) |
 | Baseline item | same shape, under `## Baseline` | |
-| Amendment | `- An · YYYY-MM-DD · kind · ops · layer: L · why` | ids sequential from A1, dates valid and non-decreasing. `kind` ∈ `discovered` `requested` `defect` `external`. `ops` = space-separated `+Dn` `-Dn` `~Dn`, or `—` for none; `+` may not reuse any ID ever used in this plan. `discovered` must give `L` as a layer (`7`) or probe (`7.2`); others may use `—` |
+| Amendment | `- An · YYYY-MM-DD · kind · ops · layer: L · why` | ids sequential from A1, dates valid and non-decreasing. `kind` ∈ `discovered` `corrected` `requested` `emergent` `defect` `external`. `ops` = space-separated `+Dn` `-Dn` `~Dn`, or `—` for none; `+` may not reuse any ID ever used in this plan. `discovered` must give `L` as a layer (`7`) or probe (`7.2`); others may use `—` |
 | Coverage row | `\| n \| Layer \| Considered\|Gap\|N/A \| a/b \| pointer or reason \|` | exactly 15 rows, numbered 1–15 in order, canonical names; `b` **equals** the rubric's probe count for that layer; Considered needs a = b and a pointer that names a real heading (and ≥ 1 D-item for layers 2–14); Gap needs a < b; N/A needs the applicability test as its reason (the script only checks it is there — ≥ 12 chars; the reviewer checks it is true) |
 | Gate line | `Gate — acceptance & testability: passed\|failed …` | in `## Coverage` |
 | Assumption | `- S-n · validated · statement · source: <…>` · `- S-n · reversible · decision · fallback: <…>` · `- S-n · decision-required · statement` (`A-n` at `dod: 1`) | `validated` without `source:` or `reversible` without `fallback:` is a grammar error |
@@ -154,6 +154,7 @@ Separator is ` · ` (space, U+00B7 middle dot, space). Never use `·` inside a f
 | Log — transition | `- YYYY-MM-DD · status → <status> · <command>` | exact commands: `draft · plan`, `ready · approve` (optionally `· review: codex`), `in-progress · start`, `in-progress · reopen An` (An exists, dated on/before), `done · close`, `cancelled · cancel · <reason>`, `superseded · supersede · by <slug>` (slug in the store); dates non-decreasing |
 | Log — evidence | `- YYYY-MM-DD · Dn · pass\|fail · type: detail · commit · who` | `type` must equal the item's type; `commit` = repo commit or `none`; `who` = agent or person |
 | Log — other | `- YYYY-MM-DD · review skipped — <reason>` · `- YYYY-MM-DD · renamed from <slug>` · `- YYYY-MM-DD · note · <text>` | the only other bullets allowed in `## Log` |
+| Log — effort | `- YYYY-MM-DD · note · effort · <W<n>.<m>\|plan> · <m> min\|<h> h <mm> min measured\|estimated · <n> k tokens measured\|estimated` (or `· tokens not recorded`) | a `note`, so `--check` reads it as any note; written by `scripts/dod-effort.mjs` or by hand. The pages read it whole and anchored; the latest line per package wins; a line that does not match is listed under "Effort lines not read" |
 
 ## Invariants the script enforces (`--check <slug>`; exit 1 on any)
 
@@ -181,7 +182,8 @@ Separator is ` · ` (space, U+00B7 middle dot, space). Never use `·` inside a f
    `coverage_reviewer` equals that review's coverage line, and a READY review is dated on/before
    `baselined`. **Re-review triggers:** an amendment whose `layer:` is a gating probe (2.1, 3.3, 4.4,
    6.2, 10.1, 10.3, 14.3) or whose ops remove an item (`-Dn`) requires a READY review dated on/after it
-   before `done`, and `review: pending` until then. `+Dn` and `~Dn` alone do not reopen review — they
+   before `done`, and `review: pending` until then; from 2026-10-02 a READY dated the amendment's own day
+   counts only when its ` · scope ` names it. `+Dn` and `~Dn` alone do not reopen review — they
    are material to the *plan* (recorded as amendments, counted by the report) but not to the *review*.
 6. **Lifecycle** — the Log transitions replay legally: `draft → ready → in-progress → done`;
    `cancelled`/`superseded` from any open state; `done → in-progress` only as `reopen An` citing an
@@ -381,7 +383,8 @@ Four rules read the reviews file (review.md has the procedure; the texts here ar
   changes no problem, warning or approval.
 - **Scope.** `--review-prompt --scope A<n>,…` builds a re-review of named amendments; the heading carries
   ` · scope A<n>,…`. A READY clears the gating or removal amendments its scope names, or all of them when it is
-  unscoped. A `blocking` finding of a scoped review whose probes all lie outside the amendments' `layer:` probes
+  unscoped — but a READY dated the same day as an amendment dated on or after 2026-10-02 (`SAME_DAY_FROM`)
+  clears it only when its scope names it. A `blocking` finding of a scoped review whose probes all lie outside the amendments' `layer:` probes
   is warned about.
 
 The heading's optional fields, in order after the reviewer: `plan commit <sha>` or `plan uncommitted`,

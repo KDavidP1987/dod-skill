@@ -192,7 +192,9 @@ export function checkSkill(name, skillsRoot = skillsDir) {
       else if (r.error) errors.push(`scripts/${f} --selftest could not start: ${r.error.message}`);
       else if (r.status !== 0) {
         // the failing cases themselves, so a red CI log names them (at most five, each cut to 300 characters)
-        const failed = (r.stdout ?? "").split(/\r?\n/).filter((l) => /^FAIL\b/.test(l)).slice(0, 5).map((l) => `\n          ${l.slice(0, 300)}`).join("");
+        // pm-views A4: and the `<name> selftest: <p>/<t> cases (…)` summary line, where dod's helpers name theirs
+        const summary = (r.stdout ?? "").split(/\r?\n/).filter((l) => / cases \(/.test(l) && !/\(all pass\)/.test(l)).slice(0, 2).map((l) => `\n          ${l.slice(0, 600)}`).join("");
+        const failed = summary + (r.stdout ?? "").split(/\r?\n/).filter((l) => /^FAIL\b/.test(l)).slice(0, 5).map((l) => `\n          ${l.slice(0, 300)}`).join("");
         errors.push(`scripts/${f} --selftest failed (exit ${r.status}): ${out}${failed}`);
       }
     }

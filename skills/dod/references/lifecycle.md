@@ -49,6 +49,14 @@ user) the three rules of building from a DoD plan:
    (`discovered` when the plan should have caught it; `requested` when the user changed scope).
 3. Do not rewrite `## Baseline`, ever.
 
+When a work package of `## Work breakdown` finishes, record its effort: run
+`node <skill>/scripts/dod-effort.mjs --since <the package's start, ISO 8601 with offset> --until <now> --plan <slug>
+--package <W<n>.<m>>` from the repository's folder. It reads only the time and token counts of this folder's Claude
+Code session records and appends `- <date> · note · effort · <package> · <active time> measured · <n> k tokens
+measured` as the last Log line (`estimated` when some records could not be read). Work done in a host that keeps no
+such record (Codex, Cursor) gets a line written by hand with `estimated`; a package with no line shows
+"not recorded" on the pages, never 0. A second line for the same package supersedes the first — never edit one.
+
 ## `status [slug]` — verification without state change
 
 Without a slug: list open plans (`ready`, `in-progress`) with `n/m` checked and any warnings.
@@ -147,6 +155,10 @@ it still does.
 
    Only then compute the rate.
 5. Set `closed`, `status → done`, write `## Report`, run `--check <slug>` (must pass), regenerate the index.
+   Then regenerate the pages: `node <skill>/scripts/dod-wbs.mjs --html <slug>` (the plan page,
+   `<store>/<slug>.html`) and `node <skill>/scripts/dod-wbs.mjs --html --dashboard` (`<store>/dod-dashboard.html`),
+   and name both files to the user. To show one as a Claude artifact, publish it as a supporting file of the
+   artifact, not its main page, so it stays the generated file unchanged (design.md › Do's and Don'ts).
 6. **Then the feedback step** — after the report is written, never before, and never as part of it. Run
    `node <skill>/scripts/dod-feedback.mjs --profile --dir <store>` (or read the consent yourself) and act
    on the answer the user gave once, at `setup` (setup.md § 3c):

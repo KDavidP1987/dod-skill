@@ -35,3 +35,6 @@ jobs:
       # release never copies, and they are run at close instead.
       - run: node skills/dod/scripts/dod-wbs.mjs --selftest
       - run: node skills/dod/scripts/dod-index.mjs --selftest
+      # pm-views: the page renderer and the effort helper ship with the skill, and are as dependency-free
+      - run: node skills/dod/scripts/dod-pages.mjs --selftest
+      - run: node skills/dod/scripts/dod-effort.mjs --selftest

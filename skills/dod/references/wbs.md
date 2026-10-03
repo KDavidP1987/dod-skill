@@ -105,9 +105,11 @@ it is cited here by its first line only. Every other row is the whole message.
 | `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> sets no text colour of its own` | 1 | Give `body` a colour from the same token set as its background. |
 | `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> skips a heading level (h<a> to h<b>)` | 1 | Use the next level down; a skipped level breaks the document outline. |
 | `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> has <n> table(s) with no header cells` | 1 | Give each table a `<thead>` of `<th scope="col">`. |
-| `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> has no same-page link to take focus` | 1 | The page is expected to link to its own items; check the renderer. |
+| `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> has nothing the keyboard can reach` | 1 | Every page has tabs, a summary or a link the keyboard reaches; check the renderer. |
 | `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> shows no focus ring on <sel>` | 1 | Restore the `:focus-visible` outline; never `outline: none` without a replacement. |
 | `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> body contrast is <r>:1, under 4.5:1` | 1 | Darken the text or lighten the ground until the ratio reaches 4.5:1. |
+| `page-check.mjs` | `page-check: <page> at <w>x<h> <theme> requested <url>` | 1 | The page asked the network for something; every page dod writes is one file with nothing to fetch. Find the tag or style that names the URL. |
+| `page-check.mjs` | `page-check: --dod-set could not render <what> (exit <code>)` | 1 | Run the same `dod-wbs.mjs --html` command on the lab's store to see its own message. |
 | `page-check.mjs` | `page-check: <n> file(s) under <out>, expected <want>` | 1 | Empty `--out` and re-run; a leftover file from an earlier run counts. |
 | `page-check.mjs` | `page-check: <path> was written outside --out` | 1 | A screenshot landed beside its page. Check the `--out` path the run was given. |
 

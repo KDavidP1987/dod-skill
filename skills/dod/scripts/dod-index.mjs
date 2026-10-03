@@ -219,6 +219,8 @@ export function parsePlan(text, file = "<memory>") {
   }
   if (i >= lines.length) { plan.parseErrors.push("frontmatter not closed"); return plan; }
   if (plan.fm.kind !== undefined) plan.kind = plan.fm.kind;
+  // field-fixes D8: `recon_commit:` names what the field holds — the commit the recon read — and is read as `commit:`
+  if ("recon_commit" in plan.fm) { if ("commit" in plan.fm) plan.reconBoth = true; else plan.fm.commit = plan.fm.recon_commit; }
   let current = "";
   for (i = i + 1; i < lines.length; i++) {
     const line = lines[i];
@@ -231,7 +233,8 @@ export function parsePlan(text, file = "<memory>") {
     if (current) plan.sections[current].push(line);
   }
   const sec = (name) => plan.sections[name] ?? [];
-  const bad = (section, l) => plan.parseErrors.push(`${section}: line does not match the grammar: ${l.slice(0, 70)}`);
+  // field-fixes D3, D19: the line is echoed cleaned and cut at 120 characters, then the form the section expects
+  const bad = (section, l, why = "") => plan.parseErrors.push(`${section}: line does not match the grammar: ${echoText(l)}${why}` + (/* ffx-mutant:grammar-hint */GRAMMAR_FORMS[section] ? ` — expected ${GRAMMAR_FORMS[section]}` : ""));
   // the title is a label: the Baseline comparison and the evidence rules see the line without it
   const item = (m) => { const t = splitTitle(m[3]); return { checked: m[1] !== " ", id: m[2], title: t.title, badTitle: t.bad, statement: t.statement, type: m[4], detail: m[5], line: `${m[2]} · ${t.statement} · ${m[4]}: ${m[5]}` }; };
   for (const l of sec("Definition of Done")) { const m = l.match(RE.item); if (m) plan.items.push(item(m)); else if (/^- /.test(l)) bad("Definition of Done", l); }
@@ -272,8 +275,8 @@ export function parsePlan(text, file = "<memory>") {
   for (const l of sec("Assumptions")) {
     const m = l.match(RE.assumption);
     if (!m) { if (/^- /.test(l)) bad("Assumptions", l); continue; }
-    if (m[2] === "validated" && !/ · source: \S/.test(m[3])) bad("Assumptions", `${l}  (validated needs \` · source: <path / doc / who confirmed>\`)`);
-    if (m[2] === "reversible" && !/ · fallback: \S/.test(m[3])) bad("Assumptions", `${l}  (reversible needs \` · fallback: <what changes if wrong>\`)`);
+    if (m[2] === "validated" && !/ · source: \S/.test(m[3])) bad("Assumptions", l, "  (validated needs ` · source: <path / doc / who confirmed>`)");
+    if (m[2] === "reversible" && !/ · fallback: \S/.test(m[3])) bad("Assumptions", l, "  (reversible needs ` · fallback: <what changes if wrong>`)");
     plan.assumptions.push({ id: m[1], type: m[2] });
   }
   for (const l of sec("Coverage")) {
@@ -285,14 +288,20 @@ export function parsePlan(text, file = "<memory>") {
   return plan;
 }
 
+const VERDICT_TOKEN = /VERDICT: (READY|REVISE)/;
+// a quoted span runs to its closing mark, or to the end of the line when it has none
+const unquoted = (l) => l.replace(/`[^`]*(?:`|$)/g, "").replace(/"[^"]*(?:"|$)/g, "").replace(/\u201c[^\u201d]*(?:\u201d|$)/g, "");
 export function parseReviews(text) {
   const reviews = [];
-  let inDisp = false, block = null;
+  let inDisp = false, block = null, lineNo = 0;
   for (const l of text.split(/\r?\n/)) {
+    lineNo++;
     let m = l.match(RE.reviewHead);
     if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), tags: new Map(), probes: new Map(), earlier: null, coverage: null, ...headFields(l) }); inDisp = false; block = null; continue; }
     if (!reviews.length) continue;
     const r = reviews.at(-1);
+    // field-fixes D4, A1: a VERDICT not alone on its line is glued — unless it is quoted in backticks or double quotes
+    if (/VERDICT: (READY|REVISE)/.test(l) && !RE.verdict.test(l) && /* ffx-mutant:verdict-glued */VERDICT_TOKEN.test(unquoted(l))) (r.glued ??= []).push(lineNo);
     if (/^### Dispositions/.test(l)) { inDisp = true; block = null; continue; }
     m = l.match(RE.verdict); if (m) { r.verdict = m[1]; block = null; continue; }
     m = l.match(RE.coverageLine); if (m) { r.coverage = l.trim(); block = null; continue; }
@@ -408,6 +417,32 @@ export const MESSAGES_CALIBRATION = {
   twinsMissing: "<An> names no twins and no failing input — add \"twins: <other places>\" or \"fails when: <input>\"",
 };
 export const fmtC = (key, vals = {}) => MESSAGES_CALIBRATION[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+// field-fixes: every problem and warning text this child adds; placeholders are <name>, filled by fmtF
+export const MESSAGES_FFX = {
+  planNotUtf8: "<file>: not UTF-8 (<reason>) — save it as UTF-8",
+  reviewsUtf16: "<file>: UTF-16 — save it as UTF-8; its reviews are not read",
+  reviewsBadBytes: "<file>: <k> invalid UTF-8 byte(s) read as U+FFFD",
+  verdictGlued: "Review <n>: a VERDICT is glued to other text on line <k> — put it on its own line",
+  leftOut: "The files below were not sent. Judge only what is quoted here; a file left out is not evidence that the plan is wrong or that the file is missing.",
+};
+// field-fixes D11, S-9: from this date a READY dated the same day as a gating or removal amendment clears it only
+// when its scope names it; earlier amendments keep the rule they were approved under (not retroactive). The date
+// is the content commit's (field-fixes build step 10, the commit `dod 0.3.1 — field-fixes`).
+export const SAME_DAY_FROM = "2026-10-02";
+export const fmtF = (key, vals = {}) => MESSAGES_FFX[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+// field-fixes D3: every grammar problem ends with the shape its section expects, as plan-template.md › Grammar
+// writes it — a reader told only "does not match" had to find the template to learn what would
+export const GRAMMAR_FORMS = {
+  "Definition of Done": "- [ ] D<n> · **title** statement · type: detail",
+  Baseline: "- [ ] D<n> · **title** statement · type: detail",
+  Amendments: "- A<n> · YYYY-MM-DD · kind · ops · layer: L · why",
+  "Work breakdown": "- W<n> · **title**, or - W<n>.<m> · **title** · items: D<n> … · steps: <n>, …",
+  Log: "- YYYY-MM-DD · status → <status> · <command>, - YYYY-MM-DD · D<n> · pass|fail · type: detail · commit · who, or - YYYY-MM-DD · note · <text>",
+  Children: "- slug · planned|in-progress|done[ · baseline|A<n>]",
+  Proposed: "- P-<n> · target · change · why",
+  Assumptions: "- S-<n> · validated|reversible|decision-required · …",
+  Coverage: "| n | Layer | Considered|Gap|N/A | a/b | pointer or reason |",
+};
 // the rules bite plans baselined on or after the day the checker ships (A4: the owner moved it from 2026-09-27),
 // and every plan not yet baselined; an earlier plan's notes are read as plain notes, as before
 export const CALIBRATION_FROM = "2026-10-02";
@@ -565,12 +600,14 @@ function readStoreOnce(dir) {
       if (/* calib-mutant:profile-fault */(true)/* calib-end */) faults.push(fmtC("profileUnreadable", { code }));
     }
   }
-  const plans = loadPlans(dir, { read, onReviewsFault: (p) => { if (/* calib-mutant:reviews-fault */(true)/* calib-end */) faults.push(fmtC("planSkipped", { name: `${p.slug}.reviews.md` })); } });
+  const encoding = [];
+  const plans = loadPlans(dir, { read, onReviewsFault: (p) => { if (/* calib-mutant:reviews-fault */(true)/* calib-end */) faults.push(fmtC("planSkipped", { name: `${p.slug}.reviews.md` })); },
+    onEncodingFault: (e) => { encoding.push(e); faults.push(e.text); } });
   for (const row of parseProjectProbes(profile).malformed) if (/* calib-mutant:profile-row-warn */(true)/* calib-end */) faults.push(fmtC("profileRow", { text: echoText(row) }));
   for (const reason of parseHost(profile).problems) if (/* calib-mutant:host-fault */(true)/* calib-end */) faults.push(fmtC("hostFault", { reason }));
   for (const p of plans) if (/* calib-mutant:plan-skipped */(p.fm.status === "done" && p.parseErrors.length > 0)/* calib-end */) faults.push(fmtC("planSkipped", { name: p.slug }));
   calibSeams.DOD_TEST_BETWEEN_READS?.(dir);
-  return { plans, profile, hashes, faults };
+  return { plans, profile, hashes, faults, encoding };
 }
 export function loadStore(dir) {
   const changed = (x) => [...x.hashes].some(([p, h]) => { try { return sha256(calibSeams.readFileSync(p)) !== h; } catch { return true; } });
@@ -579,12 +616,12 @@ export function loadStore(dir) {
     s = readStoreOnce(dir); reads = 2;
     if (/* calib-mutant:store-changed-twice */(changed(s))/* calib-end */) s.faults.push(fmtC("storeChanged"));
   }
-  STORE_META.set(s.plans, { history: missHistory(s.plans, s.profile), faults: s.faults, reads });
+  STORE_META.set(s.plans, { history: missHistory(s.plans, s.profile), faults: s.faults, reads, encoding: s.encoding });
   return s.plans;
 }
 // the history of a loaded plan list: loadStore's, with the profile; any other list computes it once, without one
 export function storeMeta(all) {
-  if (!STORE_META.has(all)) STORE_META.set(all, { history: missHistory(all, ""), faults: [], reads: 0 });
+  if (!STORE_META.has(all)) STORE_META.set(all, { history: missHistory(all, ""), faults: [], reads: 0, encoding: [] });
   return STORE_META.get(all);
 }
 // D8: the index's two lines — the history in probe order, and rework over done plans; "none yet" with no done plan
@@ -714,24 +751,58 @@ export function scopeProbes(plan, ids) {
   return out;
 }
 
-export function loadPlans(dir, { read = (p) => readFileSync(p), onReviewsFault = null } = {}) {
+// field-fixes D5: how a store file's bytes decode. A plan is decoded fatally after one leading UTF-8 byte-order mark
+// is removed; a file that only looks like a plan once decoded as UTF-16 or tolerantly is a plan that cannot be read,
+// and says so, instead of being skipped as "not a plan" or parsed with U+FFFD in it.
+const BOM8 = [0xef, 0xbb, 0xbf];
+const startsWith = (b, bytes) => bytes.every((x, k) => b[k] === x);
+const looksLikePlan = (text) => text.replace(/^\uFEFF/, "").startsWith("---");
+export function decodePlan(bytes) {
+  const b = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+  for (const [mark, enc, reason] of [[[0xff, 0xfe], "utf-16le", "UTF-16 LE byte-order mark"], [[0xfe, 0xff], "utf-16be", "UTF-16 BE byte-order mark"]]) {
+    if (/* ffx-mutant:encoding */startsWith(b, mark)) return looksLikePlan(new TextDecoder(enc).decode(b)) ? { fault: reason } : { skip: true };
+  }
+  const body = startsWith(b, BOM8) ? b.subarray(3) : b;
+  try { return { text: new TextDecoder("utf-8", { fatal: true }).decode(body) }; } catch {
+    return looksLikePlan(new TextDecoder("utf-8").decode(body)) ? { fault: "invalid byte sequence" } : { skip: true };
+  }
+}
+// a reviews file keeps review-loop D1's tolerant decode; a stray byte is counted, a UTF-16 file is not read at all
+export function decodeReviews(bytes, name) {
+  const b = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+  if (startsWith(b, [0xff, 0xfe]) || startsWith(b, [0xfe, 0xff])) return { text: "", problem: fmtF("reviewsUtf16", { file: echoText(name) }) };
+  const text = new TextDecoder("utf-8").decode(startsWith(b, BOM8) ? b.subarray(3) : b);
+  let literal = 0;
+  for (let k = b.indexOf(0xef); k >= 0; k = b.indexOf(0xef, k + 1)) if (b[k + 1] === 0xbf && b[k + 2] === 0xbd) literal++;
+  const k = (text.match(/�/g) ?? []).length - literal;
+  return { text, warning: k > 0 ? fmtF("reviewsBadBytes", { file: echoText(name), k }) : null };
+}
+
+export function loadPlans(dir, { read = (p) => readFileSync(p), onReviewsFault = null, onEncodingFault = null } = {}) {
   if (!existsSync(dir)) return [];
   const plans = readdirSync(dir)
     .filter((f) => f.endsWith(".md") && f !== "README.md" && f !== "profile.md" && !f.endsWith(".reviews.md"))
     .sort()
-    .map((f) => [f, read(join(dir, f)).toString("utf8")])
+    .map((f) => [f, decodePlan(read(join(dir, f)))])
+    // field-fixes D5: a plan file that cannot be decoded is reported by name, once, and only that file is skipped
+    .filter(([f, d]) => { if (d.fault) onEncodingFault?.({ file: f, slug: f.slice(0, -3), text: fmtF("planNotUtf8", { file: echoText(f), reason: d.fault }) }); return d.text !== undefined; })
+    .map(([f, d]) => [f, d.text])
     // The "every node" discriminator (wbs-view D34): a plan is a `.md` that OPENS with a YAML front-matter
     // block. Filtering by file name alone is not enough, because `--export md` writes `wbs.md` into this same
     // store by default — and that export was then parsed as a plan and every line of it reported as a grammar
     // problem, so `dod list` showed phantom problems for a file this skill had just written itself. Skipped
     // silently rather than counted: Rollout 2 says no existing output gains a line.
-    .filter(([, text]) => text.replace(/^﻿/, "").startsWith("---"))
+    .filter(([, text]) => text.startsWith("---"))
     .map(([f, text]) => parsePlan(text, join(dir, f)));
   for (const p of plans) {
     const rf = join(dir, `${p.slug}.reviews.md`);
     // decoded non-fatally: a stray cp1252 byte reads as U+FFFD and the file still parses (review-loop D1)
     // calibration D26: a reviews file that cannot be read is skipped with a warning when the caller asks for one
-    try { p.reviews = existsSync(rf) ? parseReviews(new TextDecoder("utf-8").decode(read(rf))) : []; } catch (e) { if (!onReviewsFault) throw e; p.reviews = []; onReviewsFault(p, e); }
+    try {
+      const d = existsSync(rf) ? decodeReviews(read(rf), `${p.slug}.reviews.md`) : { text: "" };
+      p.reviews = parseReviews(d.text);
+      p.reviewsEncoding = { problem: d.problem ?? null, warning: d.warning ?? null };
+    } catch (e) { if (!onReviewsFault) throw e; p.reviews = []; onReviewsFault(p, e); }
   }
   return plans;
 }
@@ -873,6 +944,10 @@ export function checkPlan(plan, all = [plan]) {
   const store = storeInfo(all);
   if (plan.parseErrors.length) problems.push(...plan.parseErrors);
   problems.push(...plan.limitProblems);
+  // field-fixes D4, D5
+  if (plan.reviewsEncoding?.problem) problems.push(plan.reviewsEncoding.problem);
+  if (plan.reviewsEncoding?.warning) warnings.push(plan.reviewsEncoding.warning);
+  for (const r of plan.reviews ?? []) for (const k of r.glued ?? []) problems.push(fmtF("verdictGlued", { n: r.n, k }));
   if (fm.kind !== undefined && !KINDS.includes(fm.kind)) problems.push(`kind "${fm.kind}" must be feature, product or backlog`);
   if (plan.items.length > LIMITS.items) warnings.push("plan exceeds 500 items");
   // version lines: unique labels, non-decreasing dates, text required
@@ -889,6 +964,7 @@ export function checkPlan(plan, all = [plan]) {
 
   // 0. frontmatter
   for (const k of REQUIRED_FM) if (!(k in fm)) problems.push(`frontmatter is missing ${k}`);
+  if (/* ffx-mutant:recon-commit */plan.reconBoth) problems.push("commit and recon_commit are both set — keep recon_commit");
   if (!STATUSES.includes(status)) problems.push(`status "${status}" is not one of ${STATUSES.join(", ")}`);
   if (fm.size && !SIZES.includes(fm.size)) problems.push(`size "${fm.size}" is not one of ${SIZES.join(", ")}`);
   if (fm.slug && fm.slug !== plan.slug) problems.push(`frontmatter slug "${fm.slug}" ≠ filename "${plan.slug}"`);
@@ -1156,7 +1232,8 @@ export function checkPlan(plan, all = [plan]) {
   // this child) only the last trigger is owed one, exactly as before, so no existing plan gains a problem (D13)
   const scoped = plan.reviews.some((r) => r.scope);
   for (const { a } of scoped ? reviewTriggers : reviewTriggers.slice(-1)) {
-    if (approvals.some((r) => r.date >= a.date && (!r.scope || r.scope.includes(a.id)))) continue;
+    const sameDayNamed = (r) => r.date !== a.date || a.date < SAME_DAY_FROM || /* ffx-mutant:same-day */Boolean(r.scope?.includes(a.id));
+    if (approvals.some((r) => r.date >= a.date && (!r.scope || r.scope.includes(a.id)) && sameDayNamed(r))) continue;
     if (status === "done") problems.push(`${a.id} (${gating.includes(a.layer) ? `gating probe ${a.layer}` : "removes a baseline item"}) has no READY review dated on/after it`);
     else if (review !== "pending") problems.push(`${a.id} (${gating.includes(a.layer) ? `gating probe ${a.layer}` : "removes a baseline item"}) requires review: pending until re-approved`);
   }
@@ -1281,9 +1358,12 @@ export function reportNumbers(plan, discoveredOps, grew = null) {
   // discovered counts design changes (+/~ ops on D-items), so bundling several into one amendment does not lower it
   const G = discoveredOps ?? plan.amendments.filter(counted).reduce((n, a) => n + Math.max(1, a.ops.filter((o) => /^[+~]/.test(o)).length), 0);
   const rate = B ? Math.round((B / (B + G)) * 100) : null;
+  // field-fixes D2: before the build there is nothing to score — a draft or ready plan's 100 % is an empty
+  // amendment list, not a prediction; the renderers print `n/a` for it
+  const notStarted = ["draft", "ready"].includes(plan.fm?.status); /* ffx-mutant:rate-na */
   // `grew` is the per-package growth of D17 when the caller has run the package checks; a plan with no
   // `## Work breakdown` section has no growth line at all, which is why null and [] are different answers
-  return { baseline: B, discoveredDesign: G, wrong, missedOps, ...kinds, rate, missed, grew: grew ?? (plan.hasWbs ? packageCheck(plan).grew : null), ...reworkCount(plan) };
+  return { baseline: B, discoveredDesign: G, wrong, missedOps, ...kinds, rate, notStarted, missed, grew: grew ?? (plan.hasWbs ? packageCheck(plan).grew : null), ...reworkCount(plan) };
 }
 
 // ---------------------------------------------------------------- atomic writes
@@ -1556,6 +1636,7 @@ export function stripPlanText(text, bySlug) {
     if (inFm) {
       if (l === "---") { inFm = false; fmDone = true; out.push(raw); return; }
       if (/^kind:/.test(l)) { removed.push(raw); return; }
+      if (/^recon_commit:/.test(l)) { removed.push(raw); out.push(raw.replace(/^recon_commit:/, "commit:")); return; }
       if (isV2 && /^rubric:/.test(l)) { removed.push(raw); return; }
       if (isV2 && authorLine && /^coverage_author:/.test(l) && l.trim() !== `coverage_author: ${authorLine}`) { removed.push(raw); out.push(`coverage_author: ${authorLine}`); return; }
       const pm = l.match(/^parent:\s*(.*)$/);
@@ -1660,7 +1741,7 @@ export function stripV2(dir, { dryRun = false } = {}) {
     }
     if (!done) { console.error(`strip-v2: ${slug} changed underneath — not written`); return 1; }
   }
-  return 0;
+  return /* ffx-mutant:strip-exit */0;
 }
 
 // ---------------------------------------------------------------- index / list
@@ -1672,7 +1753,7 @@ export function renderIndex(plans, dir, opts = {}) {
     const r = c.report;
     const cwe = c.problems.filter((x) => / is checked without evidence/.test(x)).length;
     const flag = c.problems.length ? ` ⚠ ${c.problems.length}` : "";
-    return `| [${p.slug}](${p.slug}.md) | ${p.fm.title ?? ""} | ${p.fm.status ?? "?"}${flag} | ${p.fm.size ?? ""} | ${c.verified}/${c.total}${cwe ? ` (+${cwe} unverified ✓)` : ""} | ${r.baseline || "—"} | ${r.rate == null ? "—" : r.rate + " %"} | ${p.fm.parent && p.fm.parent !== "none" ? p.fm.parent : ""} |`;
+    return `| [${p.slug}](${p.slug}.md) | ${p.fm.title ?? ""} | ${p.fm.status ?? "?"}${flag} | ${p.fm.size ?? ""} | ${c.verified}/${c.total}${cwe ? ` (+${cwe} unverified ✓)` : ""} | ${r.baseline || "—"} | ${r.rate == null ? "—" : r.notStarted ? "n/a" : r.rate + " %"} | ${p.fm.parent && p.fm.parent !== "none" ? p.fm.parent : ""} |`;
   });
   const done = plans.filter((p) => p.fm.status === "done").map((p) => checks.get(p.slug).report).filter((r) => r.baseline > 0);
   const sumB = done.reduce((s, r) => s + r.baseline, 0);
@@ -1764,12 +1845,16 @@ let renderSink = null;
 // ---------------------------------------------------------------- audience profile (references/audience.md)
 
 const LEVELS = ["expert", "working", "familiar", "new"];
+// field-fixes D15: how much of each person-facing output is shown at once (audience.md › Detail); no row is `full`
+export const DETAILS = ["full", "short", "short+details"];
 const AUDIENCE_ROW_CAP = 500;
 const PROFILE_CAP = 1024 * 1024;
 // Anything printed from a profile value goes through this: control characters and Unicode format characters
 // (bidi overrides, zero-width joiners) can spoof a technology name in a terminal.
 const cleanName = (v) => v.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\p{Cf}]/gu, "");
 const AUD = {
+  // field-fixes D15: matched before `row`, so `detail` is a reserved name like `who`, `default` and `asked`
+  detail: /^- detail · (.*?)\s*$/,
   who: /^- who · (.*\S)\s*$/,
   default: /^- default · (\S+)\s*$/,
   asked: /^- asked · (\S+)\s*$/,
@@ -1783,12 +1868,18 @@ export function parseAudience(text) {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((l) => /^## Audience\s*$/.test(l));
   if (start === -1) return { set: false, rows: [], problems: [] };
-  const a = { set: true, who: undefined, default: undefined, asked: undefined, rows: [], problems: [] };
+  const a = { set: true, who: undefined, default: undefined, asked: undefined, detail: undefined, rows: [], problems: [] };
   const seen = new Map();
   for (let i = start + 1; i < lines.length && !/^## /.test(lines[i]); i++) {
     const line = lines[i], n = i + 1;
     if (!line.trim()) continue;
     let m;
+    if (/* ffx-mutant:detail-row */(m = line.match(AUD.detail))) {
+      if (a.detail !== undefined) a.problems.push(AUDIENCE_MESSAGES.detailTwice);
+      else if (!DETAILS.includes(m[1])) { a.detail = null; a.problems.push(AUDIENCE_MESSAGES.detailBad(cleanName(m[1]))); }
+      else a.detail = m[1];
+      continue;
+    }
     if ((m = line.match(AUD.who))) { a.who = m[1]; if (m[1].length > 80) a.problems.push(`\`who\` over 80 characters (line ${n})`); continue; }
     if ((m = line.match(AUD.default))) { a.default = m[1]; if (!LEVELS.includes(m[1])) a.problems.push(`unknown level \`${cleanName(m[1])}\` for default (line ${n}) — one of ${LEVELS.join(", ")}`); continue; }
     if ((m = line.match(AUD.asked))) { a.asked = m[1]; if (!validDate(m[1])) a.problems.push(`\`asked\` is not a valid YYYY-MM-DD: \`${cleanName(m[1])}\` (line ${n})`); continue; }
@@ -1830,8 +1921,32 @@ export const AUDIENCE_MESSAGES = {
   notSet: "audience: not set — run setup",
   oversize: "audience: profile.md over 1 MB — not a profile; fix by hand",
   unreadable: (r) => `audience: cannot read profile.md (${r.code})`,
-  summary: (a) => `audience: default ${a.default} · ${a.rows.length} technologies · asked ${a.asked}`,
+  summary: (a) => `audience: default ${a.default} · ${a.rows.length} technologies · asked ${a.asked} · detail ${a.detail ?? "full"}`,
+  detailBad: (v) => `detail "${v}" must be full, short or short+details`,
+  detailTwice: "detail appears more than once",
+  detailFault: (why) => `warn: detail full — ${why}`,
 };
+
+// field-fixes D15, D17, D20: the detail level the review page renders at. Every fault degrades to `full` with one
+// warning naming the cause — a missing profile or a missing row is `full` with none.
+export function readDetail(dir) {
+  const f = join(dir, "profile.md");
+  let buf;
+  try {
+    const st = fsio.statSync(f, { throwIfNoEntry: false });
+    if (!st) return { detail: "full", warning: null };
+    if (st.isDirectory()) return { detail: "full", warning: AUDIENCE_MESSAGES.detailFault("profile.md is a directory") };
+    if (st.size > PROFILE_CAP) return { detail: "full", warning: AUDIENCE_MESSAGES.detailFault("profile.md is over 1 MB") };
+    buf = fsio.readFileSync(f);
+  } catch (e) { return { detail: "full", warning: AUDIENCE_MESSAGES.detailFault(`profile.md cannot be read (${e.code ?? "error"})`) }; }
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+  catch { return { detail: "full", warning: AUDIENCE_MESSAGES.detailFault("profile.md is not UTF-8") }; }
+  const a = parseAudience(text);
+  const bad = a.problems.find((p) => p === AUDIENCE_MESSAGES.detailTwice || p.startsWith("detail \""));
+  if (bad) return { detail: "full", warning: AUDIENCE_MESSAGES.detailFault(bad) };
+  return { detail: a.detail ?? "full", warning: null };
+}
 
 function profileCommand(dir) {
   const r = readAudience(dir);
@@ -2157,7 +2272,7 @@ export function reviewPrompt(dir, plans, args, { git = gitReader(), readBack = (
   const mhash = manifestHash(code.included);
   const codeSection = code.none
     ? `## Code files\n\n${fmtV("noCodeFiles", { reason: code.none })}\n`
-    : `## Code files\n\n${code.included.map((f) => `=== ${f.path} · sha256 ${f.sha} · ${f.bytes} B ===\n${f.text}${f.text.endsWith("\n") ? "" : "\n"}`).join("\n")}${code.excluded.length ? `\nLeft out:\n${exclusionLines(code.excluded).map((l) => `- ${l}`).join("\n")}\n` : ""}`;
+    : `## Code files\n\n${code.included.map((f) => `=== ${f.path} · sha256 ${f.sha} · ${f.bytes} B ===\n${f.text}${f.text.endsWith("\n") ? "" : "\n"}`).join("\n")}${code.excluded.length ? `\n${/* ffx-mutant:left-out */fmtF("leftOut")}\nLeft out:\n${exclusionLines(code.excluded).map((l) => `- ${l}`).join("\n")}\n` : ""}`;
 
   // D7 and D10: the later-round preamble and request, and the scope paragraph
   const { run } = reviewRun(plan.reviews);
@@ -2476,7 +2591,7 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
     const goodRows = ["- who · project owner", "- default · working", "- asked · 2026-09-15", "- Python · expert", "- HTML/CSS · familiar", "- GitHub Actions · working · assumed"];
     writeFileSync(profile, section(goodRows));
     const pGood = run("--profile");
-    audResults.push(pGood.code === 0 && pGood.out === "audience: default working · 3 technologies · asked 2026-09-15");
+    audResults.push(pGood.code === 0 && pGood.out === "audience: default working · 3 technologies · asked 2026-09-15 · detail full");
     // every problem class, across two sections (a section cannot both lack `asked` and carry an invalid one)
     writeFileSync(profile, section(["- who · project owner", "- default · guru", "- Python · expert", "- Python · new", "-  · new", `- ${"x".repeat(41)} · new`, "- a · b · new", "- Rust · wizard", "this is not a row"]));
     const pBad1 = run("--profile");
@@ -2502,7 +2617,7 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
     const pDup = run("--profile");
     writeFileSync(profile, section(["- default · working", "- asked · 2026-09-15", "- Redis · new"]));
     const pDupFixed = run("--profile");
-    audResults.push(pDup.code === 1 && pDup.out.includes("✗ audience: duplicate technology `Redis` (lines 8, 9)") && !pDup.out.includes("\u202E") && pDupFixed.code === 0 && pDupFixed.out === "audience: default working · 1 technologies · asked 2026-09-15");
+    audResults.push(pDup.code === 1 && pDup.out.includes("✗ audience: duplicate technology `Redis` (lines 8, 9)") && !pDup.out.includes("\u202E") && pDupFixed.code === 0 && pDupFixed.out === "audience: default working · 1 technologies · asked 2026-09-15 · detail full");
     // 501 rows → the row-count problem; 500 rows → parsed within budget
     const manyRows = (n) => ["- default · working", "- asked · 2026-09-15", ...Array.from({ length: n }, (_, i) => `- Technology ${i} · ${LEVELS[i % 4]}`)];
     writeFileSync(profile, section(manyRows(501)));
@@ -2513,7 +2628,7 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
     const p500 = run("--profile");
     const audMs = Math.round(performance.now() - tA);
     console.log(`audience-profile: 500 rows in ${audMs} ms`);
-    audResults.push(p500.code === 0 && p500.out === "audience: default working · 500 technologies · asked 2026-09-15" && audMs <= 250);
+    audResults.push(p500.code === 0 && p500.out === "audience: default working · 500 technologies · asked 2026-09-15 · detail full" && audMs <= 250);
     // 1 MB + 1 byte → refused before any read
     writeFileSync(profile, Buffer.alloc(PROFILE_CAP + 1, 0x20));
     let profileReads = 0; fsio.readFileSync = (...a) => { profileReads++; return realReadFile(...a); };
@@ -2599,7 +2714,10 @@ function selftestV2(ctx) {
     const same = ["good", "term", "bad", "bad2"].every((s) => {
       const r = node([PINNED_CHECKER, "--dir", ctx.dir, "--check", s]);
       const old = r.stdout.split(/\r?\n/).filter((l) => l.startsWith("  ✗ ")).map((l) => l.slice(4)).sort();
-      const now = [...v1.get(s).problems].sort();
+      // field-fixes A2: D3's ` — expected <form>` suffix and D19's longer echo are the wording v0.2 adds to a v0.1
+      // grammar problem; compared at v0.1's own cut of 70 characters, the set is unchanged
+      const v01 = (x) => { const m = x.replace(/ — expected .*$/, "").match(/^([^:]+: line does not match the grammar: )([\s\S]*)$/); return m ? m[1] + m[2].slice(0, 70) : x; };
+      const now = [...v1.get(s).problems].map(v01).sort();
       const eq = JSON.stringify(old) === JSON.stringify(now);
       if (!eq) details.push(`v01-compat ${s}: v0.1 ${JSON.stringify(old.filter((x) => !now.includes(x)))} vs v0.2 ${JSON.stringify(now.filter((x) => !old.includes(x)))}`);
       return eq;
@@ -2760,7 +2878,7 @@ function selftestV2(ctx) {
     expect("plain-output", plain && real.out.includes("first cut [2K cleared  and more"), lines.filter((l) => !PLAIN_RE.test(l) || l.length > 120).join(" | "));
     // … also for malformed Unicode in a controlled section and a plan file whose name is not a valid slug
     {
-      const u = store(withReviews({ "uc.md": plan("uc", { children: "- \u{1F4A5} ‮ evil" }), "bad_slug.md": plan("bad_slug"), "bp.md": plan("bp", { fm: { parent: "Bad_Parent" } }) }));
+      const u = store(withReviews({ "uc.md": plan("uc", { children: "- \u{1F4A5} \u202E evil" }), "bad_slug.md": plan("bad_slug"), "bp.md": plan("bp", { fm: { parent: "Bad_Parent" } }) }));
       const outs = [cli(u, "--check", "uc"), cli(u, "--check", "bad_slug"), cli(u, "--check", "bp")].map((r) => r.out).join("\n").split("\n").filter(Boolean);
       // a slug of 130 characters: --strip-v2 finishes (no stalled wrap) and every line stays within 120 columns
       const long = "l".repeat(130);
@@ -3868,11 +3986,11 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
         }
       }
       const d = store(files);
-      node([SELF, "--dir", d, "--strip-v2"]);
-      const left = readdirSync(d).filter((f) => isPlanFile(d, f))
-        .map((f) => [f, node([PINNED_CHECKER, "--dir", d, "--check", f.slice(0, -3)]).stdout.split(/\r?\n/).filter((l) => l.startsWith("  ✗ ")).length])
-        .filter(([, n]) => n);
-      expect("strip-v2 on this store passes the pinned checker", left.length === 0, JSON.stringify(left));
+      // field-fixes D10: the strip's exit and every pinned check's exit are asserted, as the fixture strip case does
+      const strip = node([SELF, "--dir", d, "--strip-v2"]);
+      const runs = readdirSync(d).filter((f) => isPlanFile(d, f)).map((f) => { const r = node([PINNED_CHECKER, "--dir", d, "--check", f.slice(0, -3)]); return [f, r.status, r.stdout.split(/\r?\n/).filter((l) => l.startsWith("  ✗ ")).length]; });
+      const left = runs.filter(([, code, n]) => code !== 0 || n);
+      expect("strip-v2 on this store passes the pinned checker", strip.status === 0 && left.length === 0 && runs.length > 0, `strip exit ${strip.status}; pinned exits ${JSON.stringify(left)} of ${runs.length}`);
     }
     // an older note written by the author with the same words survives; only the latest is removed
     const own = plan("m", { items: TD, baseline: ITEMS, log: "- 2026-09-15 · note · migrated to dod 2 by hand, then reverted\n" });
@@ -3945,21 +4063,21 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     }
     // hostile text: an ESC byte and U+202E in a title and in a renamed assumption line, and U+2028/U+2029 in a renamed
     // prose line, never reach the terminal
-    const H = "\x1b[2K‮";
+    const H = "\x1b[2K\u202E";
     const hd = store(withReviews({ "m.md": plan("m", { items: `- [ ] D1 · **Bad${H}title** Export downloads as CSV · test: export.test.ts\n- [ ] D2 · **Lint** Lint passes · cmd: npm run lint → 0 errors`, baseline: ITEMS }).replace("- A-1 · validated · Users are authenticated", `- A-1 · validated · Users ${H}are authenticated`).replace("\ntext\n", "\nsee A-1\u2028and\u2029more\n") }));
     // checked without evidence, so --check names D1 in a message and in the footer
     const cd = store(withReviews({ "m.md": readFileSync(join(hd, "m.md"), "utf8").replace("- [ ] D1 · **Bad", "- [x] D1 · **Bad") }));
     const ck = cli(cd, "--check", "m");
     const hm = mig(hd, "m");
-    const clean = (t) => !/[\x1b‮\u2028\u2029]/.test(t);
+    const clean = (t) => !/[\x1b\u202E\u2028\u2029]/.test(t);
     expect("migrate hostile-title", clean(ck.out) && ck.out.includes("D1 = Bad[2Ktitle") && ck.out.includes("D1 (Bad[2Ktitle) is checked without evidence"), ck.out.split("\n").slice(-4).join(" | "));
     expect("migrate hostile-line", hm.code === 0 && hm.out.split("\n").length === 4 && hm.out.split("\n").every(clean) && hm.out.includes("- S-1 · validated · Users [2Kare authenticated") && hm.out.includes("see S-1 and more"), hm.out);
     // A6: a store path is user input (--dir) — a directory name holding U+202E and the C1 control U+009B
     // never reaches the terminal through the refusal line that names it
-    const hp = join(tmp, "hp-‮-\u009b-dir");
+    const hp = join(tmp, "hp-\u202E-\u009b-dir");
     mkdirSync(hp, { recursive: true });
     const hr = mig(hp, "m");
-    expect("migrate hostile-path", hr.code === 1 && hr.out === "" && hr.err.includes("hp---dir") && !/[‮\u009b]/.test(hr.err), JSON.stringify(hr));
+    expect("migrate hostile-path", hr.code === 1 && hr.out === "" && hr.err.includes("hp---dir") && !/[\u202E\u009b]/.test(hr.err), JSON.stringify(hr));
   }
   // concurrency (D10): two processes started together; the writeAtomic contract decides
   {
@@ -4649,6 +4767,191 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
       expect("calib.rework", r.every(Boolean), JSON.stringify({ r, good: good.c.report.rework, bad: reworkP(bad.c), parsed }));
     }
 
+    // ffx.rate-na (field-fixes D2): a draft or ready plan prints n/a in the index row and on the --check line; an
+    // in-progress plan with one discovered amendment prints its number as before
+    {
+      const am1 = "- A1 · 2026-09-16 · discovered · ~D1 · layer: 4.1 · why it changed\n";
+      const d = store(withReviews({ "r.md": plan("r", { fm: { status: "ready" } }), "q.md": plan("q", { fm: { status: "draft" } }), "g.md": plan("g", { amend: am1 }) }));
+      const idx = renderIndex(loadPlans(d), d);
+      const row = (s) => idx.split("\n").find((l) => l.startsWith(`| [${s}](`)) ?? "";
+      const line = (s) => cli(d, "--check", s).out.replace(/\n {6}· /g, " · ");
+      const r = [/\| n\/a \|/.test(row("r")), /\| n\/a \|/.test(row("q")), !/100 %/.test(row("r") + row("q")),
+        line("r").includes(" · prediction rate n/a (not started)"), !/prediction rate \d/.test(line("r")),
+        / \d+ % \|/.test(row("g")) && !row("g").includes("n/a"), /prediction rate \d+ %/.test(line("g"))];
+      expect("ffx.rate-na", r.every(Boolean), JSON.stringify({ r, rows: [row("r"), row("q"), row("g")] }));
+    }
+
+    // ffx.grammar-hint (field-fixes D3): every section the parser reports a grammar problem for — read from this
+    // script's own source, not typed here — names the form it expects; the template's Amendment row names all six kinds
+    {
+      const src = readFileSync(SELF, "utf8");
+      const called = [...new Set([...src.matchAll(/\bbad\("([^"]+)"/g)].map((m) => m[1]))].sort();
+      // what each section's hint must carry, typed from plan-template.md › Grammar, never read from GRAMMAR_FORMS
+      const anchor = { "Definition of Done": "D<n> · **title**", Baseline: "D<n> · **title**", Amendments: "- A<n> · YYYY-MM-DD", "Work breakdown": "W<n>",
+        Log: "status → <status>", Children: "planned|in-progress|done", Proposed: "P-<n>", Assumptions: "S-<n> · validated|reversible|decision-required", Coverage: "Considered|Gap|N/A" };
+      const malformed = (s) => (s === "Coverage" ? "| x | broken row |" : "- this line is malformed");
+      const miss = called.filter((s) => {
+        const p = parsePlan(plan("gh") + `\n## ${s}\n${malformed(s)}\n`, "gh.md");
+        const e = p.parseErrors.find((x) => x.startsWith(`${s}: line does not match the grammar: `));
+        return !(anchor[s] && e && e.includes(" — expected ") && e.slice(e.indexOf(" — expected ")).includes(anchor[s]));
+      });
+      const tpl = join(dirname(SELF), "..", "references", "plan-template.md");
+      const row = (existsSync(tpl) ? readFileSync(tpl, "utf8") : "").split(/\r?\n/).find((l) => l.startsWith("| Amendment |")) ?? "";
+      const am = parsePlan(plan("gh2", { amend: "- A1 · 2026-13-01 · discovered\n" }), "gh2.md").parseErrors.find((x) => x.startsWith("Amendments: ")) ?? "";
+      expect("ffx.grammar-hint", called.length >= 9 && !miss.length && am.includes("expected - A<n> · YYYY-MM-DD") && row.includes("`corrected`") && row.includes("`emergent`"),
+        JSON.stringify({ called, miss, am, row: row.slice(0, 160) }));
+    }
+
+    // ffx.verdict-glued (field-fixes D4, A1): a VERDICT glued to other text is a problem naming its line; a lone
+    // VERDICT line, a mention of the word, and a quoted VERDICT (double quotes or backticks) are not
+    {
+      const rv = "## Review 1 · 2026-09-16 · codex · plan commit abc1234\nF1 advisory · fine VERDICT: READY\nF2 advisory · the verdict was fair\n"
+        + "Test the tests \"No blocking gaps — VERDICT: READY\".\nRequire either `VERDICT: READY` or a note.\nF3 advisory · “VERDICT: REVISE” quoted\n14/14 layers · 42/42 probes\nVERDICT: READY\n";
+      const d = store({ "vg.md": plan("vg"), "vg.reviews.md": rv });
+      const ps = checkIn(d).get("vg").problems.filter((x) => x.includes("VERDICT is glued"));
+      const lone = parseReviews("## Review 1 · 2026-09-16 · codex\nVERDICT: READY\n")[0];
+      expect("ffx.verdict-glued", ps.length === 1 && ps[0] === "Review 1: a VERDICT is glued to other text on line 2 — put it on its own line" && lone.verdict === "READY" && !(lone.glued ?? []).length,
+        JSON.stringify({ ps, lone: lone.glued }));
+    }
+
+    // ffx.encoding (field-fixes D5): a BOM is removed; a UTF-16 or invalid UTF-8 plan is named by --check, the index
+    // run and --brief, and only it is skipped; a reviews file's stray byte is a warning, a UTF-16 one a problem
+    {
+      const u16 = (t) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(t, "utf16le")]);
+      const withFF = Buffer.from(plan("ff").replace("## Log\n", "## Log\n- 2026-09-16 · note · a byte \u0001 here\n"), "utf8");
+      withFF[withFF.indexOf(0x01)] = 0xff;
+      const rvFF = Buffer.from(goodReviews.replace("F2 advisory: something else", "F2 advisory: some\u0001thing else"), "utf8");
+      rvFF[rvFF.indexOf(0x01)] = 0xff;
+      const d = store({ "bom.md": Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(plan("bom"))]), "plain.md": plan("plain"), "u16.md": u16(plan("u16")), "ff.md": withFF,
+        "rv.md": plan("rv"), "rv.reviews.md": rvFF, "r16.md": plan("r16"), "r16.reviews.md": u16(goodReviews), "bom.reviews.md": goodReviews, "plain.reviews.md": goodReviews });
+      const c = checkIn(d);
+      const strip = (xs) => xs.map((x) => x.replace(/\bbom\b/g, "plain")).sort();
+      const bomOk = c.plan("bom")?.fm.slug === "bom" && JSON.stringify(strip(c.get("bom").problems)) === JSON.stringify(strip(c.get("plain").problems));
+      const ck16 = cli(d, "--check", "u16"), ckFF = cli(d, "--check", "ff"), brief = cli(d, "--brief"), idx = cli(d);
+      const m16 = "u16.md: not UTF-8 (UTF-16 LE byte-order mark) — save it as UTF-8", mFF = "ff.md: not UTF-8 (invalid byte sequence) — save it as UTF-8";
+      const r = [bomOk, !c.plan("u16") && !c.plan("ff") && Boolean(c.plan("plain")),
+        ck16.code === 1 && ck16.out.includes(`✗ ${m16}`), ckFF.code === 1 && ckFF.out.includes(`✗ ${mFF}`),
+        brief.out.includes(m16) && brief.out.includes(mFF), idx.out.includes(`warn: ${m16}`) && idx.out.includes(`warn: ${mFF}`),
+        c.get("rv").warnings.includes("rv.reviews.md: 1 invalid UTF-8 byte(s) read as U+FFFD") && c.plan("rv").reviews.length === 1,
+        c.get("r16").problems.includes("r16.reviews.md: UTF-16 — save it as UTF-8; its reviews are not read") && c.plan("r16").reviews.length === 0];
+      expect("ffx.encoding", r.every(Boolean), JSON.stringify({ r, ck16: ck16.out.slice(-200), brief: brief.out, rv: c.get("rv").warnings }));
+    }
+
+    // D20: D8's comparison with the pinned checker, kept for ffx.faults to run against a checker that fails
+    let reconPinSame = null;
+    // ffx.recon-commit (field-fixes D8): recon_commit alone is the commit field; both is a problem; --strip-v2's text
+    // rewrite hands the pinned v0.1 checker `commit:`, which it reads with the same problems as the original
+    {
+      const orig = plan("rc");
+      const recon = orig.replace(/^commit: /m, "recon_commit: ");
+      const both = orig.replace(/^commit: (.*)$/m, "commit: $1\nrecon_commit: $1");
+      const d = store(withReviews({ "rc.md": recon, "rb.md": both.replace(/^slug: rc$/m, "slug: rb") }));
+      const c = checkIn(d);
+      const stripped = stripPlanText(recon, new Map()).text;
+      // the comparison counts only when the pinned checker read the plan (its header line) — an exit with nothing
+      // printed would otherwise compare two empty sets as equal (D20)
+      const pin = (t, checker) => { const pd = store({ "rc.md": t }); const r = node([checker, "--dir", pd, "--check", "rc"]);
+        return { read: (r.stdout ?? "").startsWith("rc · "), status: r.status, set: (r.stdout ?? "").split(/\r?\n/).filter((l) => l.startsWith("  ✗ ")).sort().join("\n") }; };
+      reconPinSame = (checker) => { const a = pin(stripped, checker), b = pin(orig, checker);
+        return a.read && b.read && a.status === b.status && !/missing frontmatter: commit/.test(a.set) && a.set === b.set; };
+      const r = [!c.get("rc").problems.some((x) => /missing commit/.test(x)), c.plan("rc").fm.commit === (orig.match(/^commit: (.*)$/m) ?? [])[1],
+        c.get("rb").problems.includes("commit and recon_commit are both set — keep recon_commit"), !c.get("rc").problems.includes("commit and recon_commit are both set — keep recon_commit"),
+        /^commit: /m.test(stripped) && !/^recon_commit:/m.test(stripped), !existsSync(PINNED_CHECKER) || reconPinSame(PINNED_CHECKER)];
+      expect("ffx.recon-commit", r.every(Boolean), JSON.stringify({ r, rc: c.get("rc").problems, rb: c.get("rb").problems }));
+    }
+
+    // ffx.same-day (field-fixes D11): from SAME_DAY_FROM, a same-day READY clears a gating amendment only when its
+    // scope names it; a later day's READY clears it either way; the same fixture a day earlier keeps today's rule
+    {
+      const dayBefore = (d) => new Date(Date.parse(d) - 86400000).toISOString().slice(0, 10);
+      const dayAfter = (d) => new Date(Date.parse(d) + 86400000).toISOString().slice(0, 10);
+      const owed = (amendDay, reviewDay, scope) => {
+        const amend = `- A1 · ${amendDay} · discovered · ~D1 · layer: 2.1 · the actor list was wrong\n`;
+        const r2 = `## Review 2 · ${reviewDay} · codex · plan commit abc1234${scope ? " · scope A1" : ""}\nF1 advisory: fine\n14/14 layers · 42/42 probes\nVERDICT: READY\n### Dispositions\n- F1 · accepted · no change\n`;
+        const d = store({ "sd.md": plan("sd", { amend }), "sd.reviews.md": `${goodReviews}\n${r2}` });
+        return checkIn(d).get("sd").problems.some((x) => x.startsWith("A1 (gating probe 2.1)"));
+      };
+      const D = SAME_DAY_FROM;
+      const r = [owed(D, D, false) === true, owed(D, D, true) === false, owed(D, dayAfter(D), false) === false, owed(dayBefore(D), dayBefore(D), false) === false];
+      expect("ffx.same-day", r.every(Boolean), JSON.stringify({ r, D }));
+    }
+
+    // ffx.left-out-explained (field-fixes D12): the sentence stands on the line directly before `Left out:`, and only
+    // in a prompt that leaves a file out
+    {
+      const sum2 = RUBRIC[2].counts.reduce((x, y) => x + y, 0), tot2 = `15/15 layers · ${sum2}/${sum2} probes`;
+      const CL = "- [ ] D1 · Export downloads as CSV · test: export.test.ts (fails when: the export is empty)\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors (fails when: an unused import is added)";
+      // the cited files sit in the repository, outside the plan store, so only git's status can leave one out
+      const root = join(tmp, "lo-root"), d = join(root, "docs", "dod");
+      mkdirSync(d, { recursive: true }); mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(d, "lo.md"), plan("lo", { items: CL, baseline: CL, fm: { rubric: "2", review: "pending", coverage_author: tot2, coverage_reviewer: tot2 }, coverage: { rubric: 2, all: true }, log: "Cites `src/app.js` and `src/b.js`.\n" }));
+      writeFileSync(join(root, "src", "app.js"), "a\n"); writeFileSync(join(root, "src", "b.js"), "b\n");
+      const lt = join(root, "tmp"); mkdirSync(lt, { recursive: true });
+      const via = (statusOut) => reviewPrompt(d, loadPlans(d), { slug: "lo", reviewer: "human" }, { tmp: lt, env: {},
+        git: gitReader({ run: (cmd, argv) => ({ status: 0, stdout: argv.includes("--show-toplevel") ? root : argv.includes("HEAD") ? "abc1234" : argv.includes("status") ? statusOut : "" }) }) });
+      const before = (text) => { const ls = text.split("\n"); const k = ls.indexOf("Left out:"); return k > 0 ? ls[k - 1] : null; };
+      const one = via("?? src/b.js\0"), none = via("");
+      const SENT = "The files below were not sent. Judge only what is quoted here; a file left out is not evidence that the plan is wrong or that the file is missing.";
+      expect("ffx.left-out-explained", one.code === 0 && before(one.text) === SENT && none.code === 0 && !none.text.includes("Left out:") && !none.text.includes(SENT),
+        JSON.stringify({ one: before(one.text ?? ""), none: (none.text ?? "").includes(SENT), lines: one.lines }));
+    }
+
+    // ffx.detail-row (field-fixes D15): `- detail · <v>` is read before the technology rows; a bad value and a second
+    // row are problems; no row is `full`; --profile's summary ends ` · detail <v>`
+    {
+      const sec = (rows) => `# Project profile\n\n## Audience\n- default · working\n- asked · 2026-09-15\n- Python · expert\n${rows.join("\n")}\n`;
+      const prof = (rows) => { const d = store({}); writeFileSync(join(d, "profile.md"), sec(rows)); return cli(d, "--profile"); };
+      const sd = prof(["- detail · short+details"]), none = prof([]), brief = prof(["- detail · brief"]), two = prof(["- detail · short", "- detail · full"]);
+      const r = [sd.code === 0 && sd.out.split("\n")[0] === "audience: default working · 1 technologies · asked 2026-09-15 · detail short+details",
+        none.code === 0 && none.out.split("\n")[0] === "audience: default working · 1 technologies · asked 2026-09-15 · detail full",
+        brief.code === 1 && brief.out.includes('✗ audience: detail "brief" must be full, short or short+details'),
+        two.code === 1 && two.out.includes("✗ audience: detail appears more than once"),
+        parseAudience(sec(["- detail · short"])).rows.length === 1];
+      expect("ffx.detail-row", r.every(Boolean), JSON.stringify({ r, sd: sd.out, brief: brief.out }));
+    }
+
+    // ffx.faults (field-fixes D20): a profile.md that is unreadable, a directory or not UTF-8 gives `detail full` with
+    // one warning naming the cause, never a throw; the pinned v0.1 checker exiting non-zero fails D8's comparison
+    {
+      const one = (r, cause) => r.detail === "full" && typeof r.warning === "string" && r.warning === `warn: detail full — ${cause}`;
+      const dirCase = store({}); mkdirSync(join(dirCase, "profile.md"));
+      const binCase = store({}); writeFileSync(join(binCase, "profile.md"), Buffer.from([0x2d, 0x20, 0xff, 0xfe, 0x0a]));
+      const lockCase = store({}); writeFileSync(join(lockCase, "profile.md"), "## Audience\n- detail · short\n");
+      const realRead = fsio.readFileSync;
+      let locked;
+      fsio.readFileSync = () => { const e = new Error("EACCES: permission denied"); e.code = "EACCES"; throw e; };
+      try { locked = readDetail(lockCase); } finally { fsio.readFileSync = realRead; }
+      const fakePinned = join(store({}), "pinned-fails.mjs");
+      writeFileSync(fakePinned, "process.exit(3);\n");
+      const r = [one(readDetail(dirCase), "profile.md is a directory"), one(readDetail(binCase), "profile.md is not UTF-8"),
+        one(locked, "profile.md cannot be read (EACCES)"), readDetail(store({})).warning === null && readDetail(store({})).detail === "full",
+        reconPinSame !== null && reconPinSame(fakePinned) === false];
+      expect("ffx.faults", r.every(Boolean), JSON.stringify({ r, dir: readDetail(dirCase), bin: readDetail(binCase), locked }));
+    }
+
+    // ffx.detail-docs (field-fixes D16): the three documents, read relative to this script, carry the detail format
+    {
+      const ref = (...p) => { try { return readFileSync(join(dirname(SELF), "..", ...p), "utf8").replace(/\r\n/g, "\n"); } catch { return ""; } };
+      const aud = ref("references", "audience.md"), setup = ref("references", "setup.md"), skill = ref("SKILL.md");
+      const section = (text, start, next) => { const i = text.indexOf(start); if (i < 0) return ""; const j = text.indexOf(next, i + start.length); return text.slice(i, j < 0 ? undefined : j); };
+      const detailSec = section(aud, "\n## Detail\n", "\n## ");
+      const phrases = ["short+details", "Recommended:", "Details", "Technical:", "explain <n>"];
+      const r = [detailSec.length > 0, ...phrases.map((p) => detailSec.includes(p)), /the plan file itself is never shortened/i.test(detailSec),
+        detailSec.includes("review page") && /stays complete under `short`/.test(detailSec),
+        section(setup, "## 3b.", "\n## ").includes("detail"), section(skill, "### 3.", "\n### ").includes("detail")];
+      expect("ffx.detail-docs", r.every(Boolean), JSON.stringify(r));
+    }
+
+    // ffx.echo (field-fixes D19): what this child echoes is cleaned of controls and ANSI escapes and cut at 120
+    {
+      const long = parsePlan(plan("ec", { amend: `- ${"x".repeat(500)}\n` }), "ec.md").parseErrors.find((x) => x.startsWith("Amendments: ")) ?? "";
+      const esc = parsePlan(plan("ec2", { amend: "- \u001b[2Jbad\rline\n" }), "ec2.md").parseErrors.find((x) => x.startsWith("Amendments: ")) ?? "";
+      const name = fmtF("planNotUtf8", { file: echoText("a\rb.md"), reason: "x" });
+      const echoed = long.slice(0, long.indexOf(" — expected "));
+      expect("ffx.echo", echoed.includes("…") && !echoed.includes("x".repeat(121)) && !/[\u0000-\u001f]/.test(esc) && !esc.includes("[2J") && !/\r/.test(name),
+        JSON.stringify({ long: long.length, esc, name }));
+    }
+
     // calib.twins (D9): from CALIBRATION_FROM, a discovered or corrected miss names twins or a failing input
     {
       const ON = "2026-10-02", OFF = "2026-10-01";
@@ -4800,7 +5103,8 @@ function main(argv) {
   try { dir = resolveStore(opt("--dir")); } catch (e) { console.error(`dod: ${e.message}`); return args.includes("--brief") ? 0 : 1; }
   const plans = loadStore(dir);
 
-  if (args.includes("--brief")) { console.log(briefLine(plans, dir, existsSync(dir) && !indexIsFresh(dir, plans))); return 0; }
+  const encoding = storeMeta(plans).encoding ?? [];
+  if (args.includes("--brief")) { console.log(briefLine(plans, dir, existsSync(dir) && !indexIsFresh(dir, plans)) + encoding.map((e) => ` · warn: ${e.text}`).join("")); return 0; }
   if (!existsSync(dir)) { console.error(`no plan store at ${dir} — run the dod skill's setup, or pass --dir`); return 1; }
   if (args.includes("--strip-v2")) {
     const extra = args.filter((a, k) => !["--strip-v2", "--dry-run", "--dir"].includes(a) && args[k - 1] !== "--dir");
@@ -4830,6 +5134,8 @@ function main(argv) {
   const slug = opt("--check");
   if (slug) {
     const plan = plans.find((p) => p.slug === slug);
+    const unreadable = encoding.find((e) => e.slug === slug);
+    if (!plan && unreadable) { console.log(`${showSlug(slug)} · unreadable`); console.log(`  ✗ ${unreadable.text}`); return 1; }
     if (!plan) { console.error(`no plan ${slug} in ${dir}`); return 1; }
     const c = checkPlan(plan, plans);
     const r = c.report;
@@ -4839,7 +5145,7 @@ function main(argv) {
     const printed = [];
     const say = (line, prefix = "") => { for (const l of wrapLine(plainText(line), 120, prefix)) { printed.push(l); console.log(l); } };
     say(`${showSlug(slug)} · ${plan.fm.status} · verified ${c.verified}/${c.total}`);
-    say(`baseline ${r.baseline} · discovered ${r.discovered} amendment(s) / ${r.discoveredDesign} design change(s) (wrong ${r.wrong} · missed ${r.missedOps}) · corrected ${r.corrected} · requested ${r.requested} · emergent ${r.emergent} · defect ${r.defect} · external ${r.external}` + (r.rate == null ? "" : ` · prediction rate ${r.rate} %`) + (r.grew == null ? "" : ` · ${grewLine(r.grew)}`) + reworkPart(r), "  ");
+    say(`baseline ${r.baseline} · discovered ${r.discovered} amendment(s) / ${r.discoveredDesign} design change(s) (wrong ${r.wrong} · missed ${r.missedOps}) · corrected ${r.corrected} · requested ${r.requested} · emergent ${r.emergent} · defect ${r.defect} · external ${r.external}` + (r.rate == null ? "" : r.notStarted ? " · prediction rate n/a (not started)" : ` · prediction rate ${r.rate} %`) + (r.grew == null ? "" : ` · ${grewLine(r.grew)}`) + reworkPart(r), "  ");
     say(historyLine(plan, plans), "  ");
     say(checkSummary(plan, c, warns.length), "  ");
     for (const w of warns) say(`warn: ${w}`, "  ");
@@ -4850,6 +5156,7 @@ function main(argv) {
   }
   writeAtomic(join(dir, "README.md"), renderIndex(plans, dir));
   console.log(`dod index: wrote ${join(dir, "README.md")} (${plans.length} plan(s))`);
+  for (const e of encoding) console.log(`warn: ${e.text}`);
   console.log(briefLine(plans, dir, false));
   return 0;
 }
