@@ -2,17 +2,22 @@
 
 `scripts/dod-wbs.mjs` is a **read-only view over a plan store**. It never edits a plan: `dod-index.mjs` is
 the referee that parses and checks plans, and this script renders what that referee already accepts. It
-writes only what you ask it to write — one export file, or one HTML page — and always under the store.
+writes only what you ask it to write — one export file, one HTML page or one build view — and always under the
+store. The one file it ever deletes is a build view, when `close` asks it to.
 
-Read this before running `--wbs`, `--export` or `--html`, or before ticking a plain-text surface against the
-checklist at the end.
+Read this before running `--wbs`, `--export`, `--html` or `--build`, or before ticking a plain-text surface
+against the checklist at the end.
 
 ```bash
 node skills/dod/scripts/dod-wbs.mjs [--dir <store>] --wbs [--compact] [--versions <n>|all]
 node skills/dod/scripts/dod-wbs.mjs [--dir <store>] --export csv|md [--out <path>]
 node skills/dod/scripts/dod-wbs.mjs [--dir <store>] --html <slug> [--review] [--out <path>]
-node skills/dod/scripts/dod-wbs.mjs --selftest
+node skills/dod/scripts/dod-wbs.mjs [--dir <store>] --build <slug> [--remove]
+node skills/dod/scripts/dod-wbs.mjs --selftest [--case <name>]
 ```
+
+`--selftest --case <name>` still runs the whole suite, then prints `case <name>: pass` or `case <name>: FAIL` for
+that one case and exits by it; an unknown name prints `selftest: no case "<name>"` and exits 1.
 
 The store defaults to the `dod-store:` line in the instructions file, else `docs/dod`.
 
@@ -69,6 +74,39 @@ Every string that comes from a plan is escaped at the one place the surface is b
 375 × 812 and 1280 × 900, in light and dark, and asserts what a text selftest cannot see. It is not part of
 the skill: it lives in `scripts/checks/`, has its own `package.json`, and nothing under `skills/` imports it.
 
+## The build view
+
+`--build <slug>` writes `<store>/<slug>.build.md`, the short file the builder works from once `start` has frozen
+the plan. It holds, in this order and nothing else:
+
+1. a `# Build view: <title>` heading and one line saying it is generated from `<slug>.md` and is not the source
+   of truth;
+2. the plan's North Star line (the body line starting `**North Star`), or `North Star: (none stated)`;
+3. the risk line: the frontmatter `risk:`, else the body line starting `**Risk appetite:**`, else
+   `Risk: (none stated)`;
+4. `## Components`, as the plan writes them;
+5. `## Items`: every current item as `- [ ] D<n> · **<title>** <statement> · fails when: <text>` (`[x]` when
+   checked; the evidence command is left out; an item with no fails-when ends at its statement);
+6. `## Build plan`, as the plan writes it.
+
+No coverage, Log, reviews or timestamp, so two runs on the same plan give the same bytes. Every run overwrites
+the file. It starts with a heading rather than front matter, so `--wbs` and the index skip it as a non-plan file.
+
+It aims at a quarter of the plan's size. It is never cut to fit: a view over 25 % is written whole and the
+command prints one warning, on stderr, naming its share. Both lines, exit 0:
+
+```text
+build view: wrote <slug>.build.md · <k> % of the plan
+build view: <slug>.build.md is <k> % of the plan (aim: at most 25 %) — written whole
+```
+
+The share is rounded so the two never disagree with the rule: over the line reads at least 26 %.
+
+`--build <slug> --remove` deletes the view, and is what `close` runs (lifecycle.md › close). It prints
+`build view: removed <slug>.build.md`, or `build view: no <slug>.build.md to remove` when there is none, and exits
+0 either way. The plan itself must exist: an unknown slug is refused with `wbs: no plan <slug> in <dir>`, exit 1,
+for both forms, and `--dir` works as it does for every other command.
+
 ## Failure classes
 
 One row per class. The **message** column is the string the script prints, with `<…>` for the parts filled
@@ -83,7 +121,7 @@ it is cited here by its first line only. Every other row is the whole message.
 
 | Script | Message | Exit | What you do next |
 |---|---|---|---|
-| `dod-wbs.mjs` | `usage: dod-wbs.mjs [--dir <store>] --wbs [--compact] [--versions <n>]` | 1 | Run one mode at a time; `--review` needs `--html`, `--compact` and `--versions` need `--wbs`. |
+| `dod-wbs.mjs` | `usage: dod-wbs.mjs [--dir <store>] --wbs [--compact] [--versions <n>]` | 1 | Run one mode at a time; `--review` needs `--html`, `--compact` and `--versions` need `--wbs`, `--remove` needs `--build`, `--case` needs `--selftest`. |
 | `dod-wbs.mjs` | `wbs: no plan store at <dir>` | 1 | Point `--dir` at the store, or run `dod setup` to create one. |
 | `dod-wbs.mjs` | `wbs: no plan <slug> in <dir>` | 1 | Check the slug against `--wbs`, which lists every plan in the store. |
 | `dod-wbs.mjs` | `wbs: <slug>.md does not parse — run dod-index.mjs --check <slug>` | 1 | Run that command: it names the grammar problem and the line. |

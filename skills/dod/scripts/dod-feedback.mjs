@@ -159,9 +159,10 @@ export function skillVersion(skillMd = join(dirname(SELF), "..", "SKILL.md")) {
 
 // The body is a fixed list of key: value lines — no free text unless the user asked for reasons, and none at all
 // in a success report, which stops after `result`. Nothing here is taken from the plan except numbers and enums.
-export function buildReport(plan, reviews, { version = "unknown", detail = "numbers", needles = [], reviewsUnreadable = false } = {}) {
-  const n = reportNumbers(plan);
-  const base = n.baseline, disc = n.discoveredDesign;
+export function buildReport(plan, reviews, { version = "unknown", detail = "numbers", needles = [], reviewsUnreadable = false, numbers = null } = {}) {
+  const n = numbers ?? reportNumbers(plan);
+  // north-star A2: a partial close scores the verified items only; the items waiting on the owner are named by count
+  const base = /* ns-mutant:feedback-scored */n.scored ?? n.baseline, disc = n.discoveredDesign;
   const measured = base + disc > 0;
   const rate = measured ? Math.round((base / (base + disc)) * 100) : null;
   const result = !measured ? "not measured" : rate >= TARGET ? "success" : "below target";
@@ -179,6 +180,7 @@ export function buildReport(plan, reviews, { version = "unknown", detail = "numb
     `prediction rate: ${base} / (${base} + ${disc}) = ${measured ? `${rate} %` : "none"}`,
     `target: ${TARGET} %`,
     `result: ${result}`,
+    ...(n.partial ? [`waiting on the owner: ${n.waiting.length} (not counted)`] : []),
   ];
   if (result === "success") return { title, body: [...head, "details: omitted for a success report"].join("\n"), rate, result };
 
@@ -791,6 +793,16 @@ export async function selftest({ assertTiming = false } = {}) {
     const mline = (body) => body.split("\n").find((l) => l.startsWith("missed probes: "));
     expect("ffx.missed-counts", mline(buildReport(three.p, three.reviews, { version: "0.2.0" }).body) === "missed probes: 3.1 (1), 7.2 (2)" && mline(rz.body) === "missed probes: none",
       JSON.stringify([mline(buildReport(three.p, three.reviews, { version: "0.2.0" }).body), mline(rz.body)]));
+  }
+
+  // ---- north-star A2: a partial close reports the rate over the scored items and how many wait on the owner
+  {
+    const p = parsePlan(planText({ items: 4 }), "widget.md");
+    const n = { ...reportNumbers(p), baseline: 4, scored: 3, partial: true, waiting: ["D4"], discoveredDesign: 1 };
+    const r = buildReport(p, [], { version: "0.3.3", numbers: n });
+    expect("ns-feedback-partial", r.body.includes("prediction rate: 3 / (3 + 1) = 75 %") && r.body.includes("waiting on the owner: 1 (not counted)") && r.rate === 75, JSON.stringify(r.body));
+    const whole = buildReport(p, [], { version: "0.3.3" });
+    expect("ns-feedback-whole", !whole.body.includes("waiting on the owner"), JSON.stringify(whole.body));
   }
 
   // ---- D5: reasons are opt-in, capped and scrubbed; numbers never carry free text

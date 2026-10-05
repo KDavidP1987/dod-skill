@@ -8,7 +8,8 @@
 //   node dod-wbs.mjs [--dir <store>] --wbs [--compact] [--versions <n>]
 //   node dod-wbs.mjs [--dir <store>] --export csv|md [--out <path>]
 //   node dod-wbs.mjs [--dir <store>] --html <slug> [--review] [--out <path>]
-//   node dod-wbs.mjs --selftest
+//   node dod-wbs.mjs [--dir <store>] --build <slug> [--remove]
+//   node dod-wbs.mjs --selftest [--case <name>]
 
 import {
   readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdtempSync, realpathSync,
@@ -52,7 +53,8 @@ export const USAGE = [
   "       dod-wbs.mjs [--dir <store>] --html <slug> [--review] [--out <path>]",
   "       dod-wbs.mjs [--dir <store>] --html --dashboard | --audit [--out <path>]",
   "       dod-wbs.mjs --html --benchmark --roots <dir> [--out <path>]",
-  "       dod-wbs.mjs --selftest",
+  "       dod-wbs.mjs [--dir <store>] --build <slug> [--remove]",
+  "       dod-wbs.mjs --selftest [--case <name>]",
 ].join("\n");
 
 // Every failure line this script can print (D27). page-check.mjs keeps its own; references/wbs.md holds the
@@ -85,7 +87,7 @@ const fail = (key, vars) => { throw new WbsError(fmt(key, vars)); };
 // ---------------------------------------------------------------- arguments
 
 export function parseArgs(argv) {
-  const a = { dir: null, mode: null, compact: false, versions: null, format: null, slug: null, review: false, out: null, page: null, roots: null };
+  const a = { dir: null, mode: null, compact: false, versions: null, format: null, slug: null, review: false, out: null, page: null, roots: null, remove: false, caseName: null };
   const pages = [];
   const modes = [];
   for (let i = 0; i < argv.length; i++) {
@@ -106,12 +108,20 @@ export function parseArgs(argv) {
       case "--review": a.review = true; break;
       case "--out": a.out = next(); break;
       case "--selftest": modes.push("selftest"); break;
+      // north-star D10: the short build view, and its removal at `close`
+      case "--build": modes.push("build"); a.slug = next(); break;
+      case "--remove": a.remove = true; break;
+      case "--case": a.caseName = next(); break;
       default: throw new WbsError(USAGE);
     }
   }
   // exactly one mode — "--wbs --export csv" is a usage error, not a silent precedence rule
   if (modes.length !== 1) throw new WbsError(USAGE);
   a.mode = modes[0];
+  if (a.remove && a.mode !== "build") throw new WbsError(USAGE);
+  if (a.caseName !== null && a.mode !== "selftest") throw new WbsError(USAGE);
+  if (a.mode === "build" && a.out !== null) throw new WbsError(USAGE);
+  if (a.mode === "build" && !SLUG_RE.test(a.slug)) fail("badSlug", { slug: plainText(a.slug) });
   if (a.mode === "export" && !["csv", "md"].includes(a.format)) throw new WbsError(USAGE);
   if (a.review && a.mode !== "html") throw new WbsError(USAGE);
   if ((pages.length || a.roots !== null) && a.mode !== "html") throw new WbsError(USAGE);
@@ -914,7 +924,7 @@ export function renderReviewPage(plan, layers = readLayers(), { detail = "full" 
 // borrowed from the tree — so the page a reviewer opens is the plan a reviewer was given. The plan page adds its
 // reviews file and git's commit times (pm-views D6, D11); the review page adds `references/layers.md`, which is
 // authoritative for probe text.
-function readOnePlan(dir, slug) {
+function readPlanFile(dir, slug) {
   const file = join(dir, `${slug}.md`);
   if (!existsSync(file)) fail("noPlan", { slug: plainText(slug), dir: plainText(dir) });
   let text;
@@ -922,14 +932,110 @@ function readOnePlan(dir, slug) {
   catch (e) { fail("unreadable", { file: plainText(file), code: e.code ?? "unknown" }); }
   const plan = parsePlan(text, file);
   if (plan.parseErrors.length) fail("noParse", { slug: plainText(slug) });
-  return plan;
+  return { plan, text };
 }
+function readOnePlan(dir, slug) { return readPlanFile(dir, slug).plan; }
 
 function readReviewsOf(dir, slug) {
   const file = join(dir, `${slug}.reviews.md`);
   if (!existsSync(file)) return null;
   try { return parseReviews(readFileSync(file, "utf8")); }
   catch (e) { fail("unreadable", { file: plainText(file), code: e.code ?? "unknown" }); }
+}
+
+// ---------------------------------------------------------------- the short build view (north-star D10)
+//
+// `<store>/<slug>.build.md` is what the builder works from once the plan is frozen: the North Star, the risk line,
+// the components, the current items with their fails-when, and the Build plan — nothing else. It is generated,
+// overwritten by every `--build`, never the source of truth (Data 3.3), and removed by `close` (8.2). It is a pure
+// function of the plan text, so two runs give the same bytes (9.3): no timestamp, no store state, no git. It aims
+// at a quarter of the plan (13.2) and is never cut: a larger one is written whole and the share is named.
+// It opens with a `#` heading, never `---`, so the store's readers skip it as a non-plan file.
+
+export const BUILD_SHARE_MAX = 25; // per cent of the plan's bytes (north-star 13.2)
+
+// the text after `fails when:` in an item's evidence, without the parenthesis that wraps the clause in most plans
+export function failsWhenOf(detail) {
+  const k = detail.indexOf("fails when:");
+  if (k < 0) return "";
+  let t = detail.slice(k + "fails when:".length).trim();
+  if (detail.slice(0, k).trimEnd().endsWith("(") && t.endsWith(")")) t = t.slice(0, -1).trimEnd();
+  return t;
+}
+
+export function buildItemLine(it) {
+  const title = it.title ? "**" + it.title + "** " : "";
+  const fw = failsWhenOf(it.detail);
+  return "- [" + (it.checked ? "x" : " ") + "] " + it.id + " · " + title + it.statement + (fw ? " · fails when: " + fw : "");
+}
+
+// a section's lines as the plan writes them, without the blank lines around them
+function sectionAsWritten(plan, name) {
+  const ls = [...(plan.sections[name] ?? [])];
+  while (ls.length && !ls[0].trim()) ls.shift();
+  while (ls.length && !ls[ls.length - 1].trim()) ls.pop();
+  return ls.length ? ls : ["(none in the plan)"];
+}
+
+export function buildView(plan, text) {
+  const lines = text.split(/\r?\n/);
+  const close = lines.indexOf("---", 1);
+  const body = close > 0 ? lines.slice(close + 1) : [];
+  const northStar = body.find((l) => l.startsWith("**North Star")) ?? "North Star: (none stated)";
+  const risk = plan.fm.risk ? "Risk: " + plan.fm.risk : (body.find((l) => l.startsWith("**Risk appetite:**")) ?? "Risk: (none stated)");
+  const components = /* build-mutant:components */sectionAsWritten(plan, "Components")/* build-end */;
+  return [
+    `# Build view: ${plan.fm.title ?? plan.slug}`,
+    "",
+    `Generated from \`${plan.slug}.md\` by \`dod-wbs.mjs --build\`; it is not the source of truth. Change the plan, then run \`--build\` again.`,
+    "",
+    northStar,
+    "",
+    risk,
+    "",
+    "## Components",
+    ...components,
+    "",
+    "## Items",
+    ...(plan.items.length ? plan.items.map(buildItemLine) : ["(none in the plan)"]),
+    "",
+    "## Build plan",
+    ...sectionAsWritten(plan, "Build plan"),
+    "",
+  ].join(NEWLINE);
+}
+
+// the share is rounded so the two lines never disagree with the rule: over the line reads at least 26 %, and a
+// view at or under it never reads more than 25 %
+export function buildShare(viewBytes, planBytes) {
+  const over = viewBytes * 100 > planBytes * BUILD_SHARE_MAX;
+  const exact = planBytes ? (viewBytes * 100) / planBytes : 100;
+  return { over, pct: over ? Math.ceil(exact) : Math.floor(exact) };
+}
+
+function runBuild(dir, a, io) {
+  const name = `${a.slug}.build.md`;
+  const target = join(dir, name);
+  if (a.remove) {
+    // `close` runs this: the plan must exist, the view need not
+    if (!existsSync(join(dir, `${a.slug}.md`))) fail("noPlan", { slug: plainText(a.slug), dir: plainText(dir) });
+    let st = null;
+    try { st = lstatSync(target); } catch { /* no view to remove */ }
+    if (!st) { io.log(`build view: no ${name} to remove`); return 0; }
+    if (st.isSymbolicLink()) fail("link", { path: plainText(target) });
+    /* build-mutant:remove */unlinkSync(target)/* build-end */;
+    io.log(`build view: removed ${name}`);
+    return 0;
+  }
+  const { plan, text } = readPlanFile(dir, a.slug);
+  const view = buildView(plan, text);
+  const planBytes = Buffer.byteLength(text, "utf8");
+  const share = buildShare(Buffer.byteLength(view, "utf8"), planBytes);
+  // written whole whatever its share: a view cut to fit would drop items the builder needs (north-star 13.2)
+  /* build-mutant:write */writeUnderStore(dir, target, view)/* build-end */;
+  if (share.over) { /* build-mutant:warning */io.error(`build view: ${name} is ${share.pct} % of the plan (aim: at most ${BUILD_SHARE_MAX} %) — written whole`);/* build-end */ }
+  else io.log(`build view: wrote ${name} · ${share.pct} % of the plan`);
+  return 0;
 }
 
 registerRenderer("plan", {
@@ -962,7 +1068,7 @@ registerRenderer("review", {
 // the one failure class that needs the store to change between two reads, and D26 forbids a second process.
 export function main(argv, io = console, { reads = readStore, commitTimes = null } = {}) {
   const a = parseArgs(argv);
-  if (a.mode === "selftest") return selftest(io);
+  if (a.mode === "selftest") return selftest(io, { only: a.caseName });
   // the benchmark reads a folder of projects, not a store: it resolves no store of its own
   const dir = a.page === "benchmark" ? null : resolveStore(a.dir);
   switch (a.mode) {
@@ -1004,6 +1110,8 @@ export function main(argv, io = console, { reads = readStore, commitTimes = null
       io.log(statusLine("html", c.count, c.summary, c.skipped));
       return 0;
     }
+    case "build":
+      return runBuild(dir, a, io);
     default:
       throw new WbsError(USAGE);
   }
@@ -1051,17 +1159,21 @@ export function planText(slug, o = {}) {
   return `---\n${head}\n---\n\n# DoD: ${slug}\n\n## Definition of Done\n${body}\n\n## Baseline\n${(o.baseline ?? items).map((i) => `- [ ] ${i.id} · **${i.title ?? i.id}** ${i.stmt ?? "something is true"} · test: a case`).join("\n")}\n\n## Amendments\n${o.amend ?? ""}\n${o.children !== undefined ? `## Children\n${o.children}\n\n` : ""}${o.extra ?? ""}## Log\n- 2026-09-19 · status → draft · plan\n- 2026-09-19 · status → ready · approve\n- 2026-09-19 · status → in-progress · start\n${o.log ?? ""}`;
 }
 
-export function selftest(io = console) {
+export function selftest(io = console, { only = null } = {}) {
   let pass = 0; const failed = [];
   // D33: what must be true is that every REGISTERED assertion actually asserted something — not that it
   // used its own id as a label. A case that covers three sub-claims names all three; a case that quietly
   // stops checking anything still has to fail.
   let fired = 0, never = 0;
   const expect = (id, ok, detail = "") => { fired++; if (ok) pass++; else failed.push(`${id}${detail ? ` — ${detail}` : ""}`); };
+  // north-star: `--case <name>` answers for one registered case by its id — passed means it asserted something
+  // and nothing it asserted failed
+  const caseResult = new Map();
   for (const { id, fn } of ASSERTIONS.values()) {
-    const before = fired;
-    try { fn(expect); } catch (e) { failed.push(`${id} — threw ${plainText(String(e?.message ?? e))}`); continue; }
+    const before = fired, failedBefore = failed.length;
+    try { fn(expect); } catch (e) { failed.push(`${id} — threw ${plainText(String(e?.message ?? e))}`); caseResult.set(id, false); continue; }
     if (fired === before) { never++; failed.push(`${id} — registered but never asserted`); }
+    caseResult.set(id, fired > before && failed.length === failedBefore);
   }
   // D33's counts line, in the shape A8 states for a fixture suite. The five checkers under `scripts/checks/`
   // judge a store, a repository or a set of pages, so each of their assertions has a violation that can be
@@ -1089,6 +1201,14 @@ export function selftest(io = console) {
   // D13: the timings are printed on every run with the platform and Node version, and asserted only when
   // DOD_SELFTEST_TIMING=assert — so the number is always visible and never fails a correct render on a slow box
   for (const a of ASSERTIONS.values()) if (a.timing) io.log(`  timing: ${a.timing}`);
+  // the whole suite ran above; with `--case` the exit is that case's alone, and an unknown name is a failure,
+  // never a silent pass (the same contract as dod-index.mjs --selftest --case)
+  if (only !== null) {
+    if (!caseResult.has(only)) { io.log(`selftest: no case "${plainText(only)}"`); return 1; }
+    const ok = caseResult.get(only);
+    io.log(`case ${only}: ${ok ? "pass" : "FAIL"}`);
+    return ok ? 0 : 1;
+  }
   return failed.length ? 1 : 0;
 }
 
@@ -2867,6 +2987,213 @@ assertion("bounds.no-store", "bounds", (expect) => {
   let line = "accepted";
   try { readStore(missing); } catch (e) { line = e.line; }
   expect("bounds.no-store", line === fmt("noStore", { dir: plainText(missing) }), line);
+});
+
+// --- case ns-build-view (north-star D10) --------------------------------------
+//
+// A realistic rubric-3 plan of twenty items, sized like a real one: fifteen layer sections, a coverage table,
+// assumptions, components, items with evidence and fails-when, a Baseline, amendments and a Log, so the items are
+// a minority of its bytes. Its view must hold every component and item and stay within a quarter of the plan.
+// A second, oversized fixture (a tiny plan of long items) must be written whole with the warning naming its share.
+
+const BV_ITEMS = [
+  ["Month export", "a finance user picks a month and downloads that month's posted ledger lines as one CSV file", "a month with posted lines downloads an empty file"],
+  ["Column order", "the CSV columns follow the order in the finance team's import template, with a header row", "the amount column moves ahead of the account column"],
+  ["Amounts exact", "amounts are written as decimal strings with two places and never pass through a float", "0.10 + 0.20 is written as 0.30000000000000004"],
+  ["Formula guard", "a cell that would begin with =, +, - or @ is written with a leading apostrophe", "a memo of =HYPERLINK(...) reaches the file bare"],
+  ["Time zone", "a line belongs to the month of its posting date in the ledger's own time zone", "a line posted 23:30 on the 31st local time lands in the next month"],
+  ["Empty month", "a month with no posted lines downloads a header-only file and says so on screen", "an empty month returns an error page"],
+  ["Large month", "a month of 200,000 lines downloads in under 20 seconds without holding it all in memory", "the 200,000-line fixture takes over 20 seconds or 512 MB"],
+  ["Finance only", "only users with the finance role see the export button or reach the endpoint", "a support user's request returns the file"],
+  ["Audit line", "every export writes one audit record naming who, which month and how many lines", "an export leaves no audit record"],
+  ["Retry safe", "a dropped connection can be retried and gives the same bytes for the same month", "two downloads of a closed month differ"],
+  ["Open month", "an export of the current, open month is marked provisional in its file name", "the open month's file has the same name as a closed one"],
+  ["Filename", "the file is named ledger-YYYY-MM.csv, plus -provisional for an open month", "the file is named export.csv"],
+  ["Encoding", "the file is UTF-8 with a byte-order mark so Excel opens accented names correctly", "Excel shows garbled characters in a supplier name with an accent"],
+  ["Line endings", "rows end in CRLF as the import template requires", "rows end in a bare LF"],
+  ["Reversed lines", "a reversal is exported as its own line with a negative amount, never netted away", "a posted line and its reversal are merged into one zero line"],
+  ["Currency", "each line carries its ISO currency code; no amount is converted", "a EUR line is exported in GBP"],
+  ["Cancel", "a user can cancel a running export and no partial file is offered", "a cancelled export leaves a partial download link"],
+  ["Error text", "a failed export tells the user what happened and what to do next, in one sentence", "a failure shows a stack trace"],
+  ["Accessible", "the month picker and button work by keyboard alone and are announced by a screen reader", "the button cannot be reached with Tab"],
+  ["Rate limit", "one user can run at most three exports a minute; the fourth is refused with the wait time", "a fourth export within a minute starts"],
+];
+
+const BV_LAYERS = [
+  ["Purpose & typical use", null, "1.1 — Finance closes each month by importing the ledger into the group consolidation tool; today someone copies it out of a report by hand, which takes an afternoon and drops lines. Two of the last six closes needed a second import because a page of the report was missed. 1.2 — Done means the month's file imports cleanly on the first try, with a line count that matches the ledger's own month total. 1.3 — The team's controller is the person who judges that it does, on a real close, not on a fixture. 1.4 — The typical user exports once a month and does not want a choice of formats, columns or filters: the template decides all three."],
+  ["Use cases", "Typical", "8.0 — A finance user opens Exports on the first working day, picks last month and downloads the file, then imports it. The whole round trip should take under a minute for an ordinary month of 40,000 to 60,000 lines. If the user is unsure which month is closed, the picker says so beside each month rather than in a help page."],
+  [null, "Minimal stretch", "8.1 — A month with no posted lines still gives a header-only file and a plain message, so the import step can run unchanged. A one-line month behaves like any other. A month whose only lines are a posting and its reversal exports both lines, and their amounts sum to zero in the consolidation tool rather than in the file."],
+  [null, "Maximal stretch", "8.2 — The largest month on record had 180,000 lines; the fixture uses 200,000 so the limit is tested with headroom. 8.3 — Two users exporting the same month at once each get identical bytes, because the file depends only on the month and the ledger. 8.4 — A supplier name of 500 characters with commas, quotes and a line break is quoted, not split across rows."],
+  ["Business rules", null, "4.1 — A line belongs to the month of its posting date in the ledger time zone, never the user's browser time zone. 4.2 — Reversals are lines in their own right: netting them would hide a correction the auditors ask about. 4.3 — The open month can be exported but is always marked provisional, so nobody imports it as final by mistake. 4.4 — No amount is ever converted between currencies; conversion is the consolidation tool's job and doing it twice is a known source of rounding drift. 4.5 — Precedence: the template's column order beats any column order a user might prefer."],
+  ["Interfaces", "Internal — reads / writes / changes (paths or symbols)", "5.1 — Reads the ledger_lines table through the existing read replica connection, the same one the monthly reports use. 5.2 — Writes one row to audit_events per export, with the month, the user, the line count and the outcome. 5.3 — Adds the /exports/ledger endpoint and the Exports page under the existing finance navigation. Nothing else in the ledger service changes, and no shared module gains a parameter."],
+  [null, "External — dependencies and their failure behaviour", "6.1 — The read replica can lag by up to a minute; an export of a closed month is unaffected, and an export of the open month is provisional anyway. 6.2 — If the replica is down the export fails with the error text item rather than falling back to the primary, which month-end load would hurt. 6.3 — No new package: the CSV writer is twenty lines and the existing streaming helper does the rest."],
+  ["Design", "Data", "3.1 — No new table; one new audit event type, ledger_export, with four fields. 3.2 — The file is generated per request and never stored, so there is nothing to clean up and nothing to leak at rest. 3.3 — The audit record is kept as long as every other audit record, under the existing retention policy, which the controller confirmed is seven years."],
+  [null, "States", "7.1 — An export is running, finished, cancelled or failed. 7.2 — A cancelled or failed export offers no file, and the page says which of the two happened. 7.3 — There is no queued state: an export starts immediately or is refused with the wait time. 7.4 — Two tabs exporting the same month are two independent exports; neither waits for the other."],
+  [null, "Permissions", "2.1 — The finance role can export; no other role sees the page or reaches the endpoint. 2.2 — Admins have no extra power here: an admin without the finance role is refused like anyone else. 2.3 — The audit record names the user, so a shared login shows up in review. 2.4 — Service accounts have no access; the consolidation tool is fed by a person, on purpose."],
+  [null, "UX", "11.1 — One page: a month picker, a button and a status line, and nothing a first-time user has to read first. 11.2 — The design bar is the existing Reports page; the controller judges it on a real close. 11.3 — Keyboard and screen reader use are part of done, checked with the screen reader the team already uses. 11.4 — Every message is one sentence that says what happened and what to do next."],
+  ["Security", null, "10.1 — The endpoint checks the role on every request, not only when the page renders, because the URL is guessable. 10.2 — Cells are guarded against formula injection, since the first thing anyone does with the file is open it in a spreadsheet. 10.3 — The file carries no data beyond the ledger lines the user could already see in the monthly report. 10.4 — No secret is involved; the replica credentials stay where they are today."],
+  ["Failure & observability", null, "12.1 — A failed export logs the month, the user and the cause, never the file contents or an amount. 12.2 — The audit record is how support answers who exported what, and when. 12.3 — Exports over 20 seconds are logged as slow, so a creeping replica shows up before a close fails. 12.4 — Each item names the input that makes its check fail, and each check was seen failing first."],
+  ["Performance", null, "13.1 — 200,000 lines in under 20 seconds and under 512 MB, streamed row by row rather than built in memory. 13.2 — The rate limit keeps a stuck browser from starting a dozen exports against the replica at month end, when the replica is busiest. 13.3 — The page itself loads in the time the Reports page does; the month list is one small query."],
+  ["Rollout", null, "14.1 — Behind the finance-exports flag, on for the finance team first and for nobody else. 14.2 — Rollback is turning the flag off; nothing is stored, so nothing needs migrating back. 14.3 — The old report stays until the controller signs off one close done with the new file. 14.4 — The release note goes to the finance channel with the file name format and the provisional rule."],
+  ["Out of scope", null, "15.1 — Scheduled exports, other file formats, column choice and exporting other ledgers. 15.2 — Deferred: an XLSX option, if the consolidation tool ever asks for one, and a direct push into that tool, which needs its vendor's API."],
+  ["Also considered", null, "Generating the file nightly and storing it was rejected: it adds storage, retention and a stale-file risk for no gain on a month that is already closed. Extending the monthly report with a download link was rejected because the report paginates and its column order is not the template's."],
+];
+
+function bvPlanText() {
+  const L = [];
+  const fm = [
+    "dod: 2", "rubric: 3", "id: dod-20261004-bvfx", "slug: export-audit",
+    "title: export-audit — a finance user exports a month's ledger as a CSV the consolidation tool imports",
+    "status: in-progress", "size: M", "parent: none", "kind: feature", "created: 2026-10-01", "baselined: 2026-10-02",
+    "closed: none", "recon_commit: abc1234", "coverage_author: 15/15 layers · 50/50 probes",
+    "coverage_reviewer: 15/15 layers · 50/50 probes", "review: human", "profile: full",
+    "risk: finance data, user-facing; a wrong amount or a lost line is not acceptable, a slow export is",
+  ];
+  L.push("---", ...fm, "---", "", "# DoD: export-audit — a finance user exports a month's ledger as a CSV the consolidation tool imports", "");
+  L.push("**Size:** M. One endpoint, one page and one audit event type, inside the existing ledger service.");
+  L.push("**Planned:** interactively. The controller answered six questions on 2026-10-01; all are recorded in the Assumptions.");
+  L.push("**Request:** the finance team's ticket asking to stop copying the month-end ledger out of a report by hand.");
+  L.push("**Recon:** the ledger service already streams the monthly report from the read replica; the export reuses that path and adds one endpoint, one page and one audit event type. No other service reads or writes ledger_lines.");
+  L.push("**For reviewers:** a finding blocks only if it names an outcome, a component, the design bar or a completion limit of this plan that would fail; tag it `blocks: outcome | component | design | limit`. End with one line per layer and a `missing components:` line.");
+  L.push("", "**North Star for this plan:** a finance user gets last month's ledger as a file the consolidation tool imports on the first try, with every line and every amount exactly as posted.", "");
+  L.push("## Components", "Each component is a part the export is incomplete without.");
+  const comps = [
+    ["C1", "The file", "One CSV per month, in the import template's shape.", [1, 2, 12, 13, 14]],
+    ["C2", "Correct numbers", "Every posted line, every amount exact, in the right month.", [3, 5, 15, 16]],
+    ["C3", "Safe to open", "No cell runs as a formula and no data beyond the ledger leaves.", [4, 8]],
+    ["C4", "Works at month end", "Empty, open, large and repeated exports all behave.", [6, 7, 10, 11, 20]],
+    ["C5", "A page people can use", "Clear states, cancel, plain errors, keyboard and screen reader.", [17, 18, 19]],
+    ["C6", "Accountable", "Every export leaves an audit record.", [9]],
+  ];
+  for (const [id, t, s, ds] of comps) L.push("- " + id + " · **" + t + ".** " + s + " · " + ds.map((d) => "D" + d).join(" "));
+  const item = (k, [t, s, f], box) => "- [" + box + "] D" + (k + 1) + " · **" + t + "** " + s
+    + " · cmd: node scripts/check-export.mjs --case export-" + (k + 1) + " --fixture fixtures/ledger-2026-09.sql (fails when: " + f + ")";
+  L.push("", "## Definition of Done", ...BV_ITEMS.map((x, k) => item(k, x, k < 3 ? "x" : " ")), "");
+  for (const [section, sub, text] of BV_LAYERS) {
+    if (section) L.push("## " + section);
+    if (sub) L.push("### " + sub);
+    L.push(text, "");
+    if (section === "Performance") {
+      L.push("## Build plan",
+        "1. Endpoint skeleton behind the flag, role check and audit record · advances C3 C6 · satisfies D8, D9",
+        "2. Streaming writer: template columns, exact amounts, formula guard, encoding and line endings · advances C1 C2 C3 · satisfies D1, D2, D3, D4, D13, D14",
+        "3. Month rules: time zone, reversals, currency, open month and file name · advances C1 C2 C4 · satisfies D5, D11, D12, D15, D16",
+        "4. Month-end behaviour: empty month, the 200,000-line fixture, retries and the rate limit · advances C4 · satisfies D6, D7, D10, D20",
+        "5. The page: states, cancel, error text, keyboard and screen reader · advances C5 · satisfies D17, D18, D19",
+        "6. Controller imports September's file into the consolidation tool and signs off · advances C1 C2", "");
+      L.push("## Work breakdown",
+        "- W1 · **Server side**",
+        "- W1.1 · **Endpoint and audit** · items: D8 D9 · steps: 1",
+        "- W1.2 · **Streaming writer** · items: D1 D2 D3 D4 D13 D14 · steps: 2",
+        "- W1.3 · **Month rules** · items: D5 D11 D12 D15 D16 · steps: 3",
+        "- W1.4 · **Month-end behaviour** · items: D6 D7 D10 D20 · steps: 4",
+        "- W2 · **Page**",
+        "- W2.1 · **States and accessibility** · items: D17 D18 D19 · steps: 5", "");
+    }
+  }
+  L.push("## Assumptions",
+    "- A-1 · validated · ledger_lines carries posted_at in the ledger time zone · source: db/schema.sql and the controller, 2026-10-01",
+    "- A-2 · reversible · the import template's column order is stable · fallback: the order is one constant, changed in one place",
+    "- A-3 · validated · no month has exceeded 180,000 lines · source: the replica's row counts, 2026-10-01", "");
+  L.push("## Coverage", "| # | Layer | Status | Probes | Pointer |", "|---|---|---|---|---|");
+  const names = ["Purpose", "Actors & permissions", "Data", "Business rules", "Interfaces internal", "Interfaces external", "States", "Minimal stretch",
+    "Maximal stretch", "Security", "Design", "Failure & observability", "Performance", "Rollout", "Scope"];
+  names.forEach((n, k) => L.push("| " + (k + 1) + " | " + n + " | Considered | 3/3 probes | " + n + " › " + (k + 1) + ".1 D" + (k + 1) + "; " + (k + 1) + ".2 D" + ((k + 3) % 20 + 1) + "; " + (k + 1) + ".3 prose: stated in the section above |"));
+  L.push("", "Gate — acceptance & testability: passed · every item names its failing input", "");
+  L.push("## Baseline", ...BV_ITEMS.slice(0, 19).map((x, k) => item(k, x, " ")), "");
+  L.push("## Amendments", "- A1 · 2026-10-03 · discovered · +D20 · layer: 13.2 · twins: none · fails when: a stuck browser starts a dozen exports against the replica", "");
+  L.push("## Log", "- 2026-10-01 · status → draft · plan", "- 2026-10-02 · status → ready · approve · review: human", "- 2026-10-02 · status → in-progress · start");
+  for (let k = 1; k <= 3; k++) L.push("- 2026-10-03 · D" + k + " · pass · cmd: node scripts/check-export.mjs --case export-" + k + " — ok · abc1234 · claude");
+  L.push("- 2026-10-03 · note · the replica lag was measured at 4 seconds on a quiet afternoon",
+    "- 2026-10-04 · note · the controller confirmed the template's column order against the consolidation tool's import screen",
+    "- 2026-10-04 · note · the 200,000-line fixture was generated from September's shape with names and amounts replaced", "");
+  return L.join(NEWLINE);
+}
+
+// a tiny plan of long items: its view is most of the plan, so it must be written whole and warned about
+function bvOversizedText() {
+  const long = (k) => "the export of ledger month " + k + " keeps " + "every posted line, every reversal and every currency code exactly as the ledger holds it, ".repeat(6) + "end of item " + k;
+  const items = [1, 2, 3].map((k) => "- [ ] D" + k + " · **Long item " + k + "** " + long(k) + " · cmd: node c.mjs (fails when: " + "a line of month " + k + " is missing, ".repeat(4) + "end of clause " + k + ")");
+  return ["---", "dod: 2", "rubric: 3", "id: dod-20261004-bvov", "slug: big-items", "title: big-items", "status: in-progress", "size: S",
+    "parent: none", "created: 2026-10-01", "baselined: 2026-10-01", "closed: none", "commit: abc1234",
+    "coverage_author: 15/15 layers · 50/50 probes", "coverage_reviewer: 15/15 layers · 50/50 probes", "review: human", "---", "",
+    "**Risk appetite:** low; a lost line is not acceptable.", "", "## Components", "- C1 · **All of it.** The whole export. · D1 D2 D3", "",
+    "## Definition of Done", ...items, "", "## Build plan", "1. Write it · advances C1 · satisfies D1, D2, D3", ""].join(NEWLINE);
+}
+
+const BV_WARNING = /^build view: big-items\.build\.md is (\d+) % of the plan \(aim: at most 25 %\) — written whole$/;
+
+assertion("ns-build-view", "ns-build-view", (expect) => {
+  const planText20 = bvPlanText();
+  const dir = makeStore({ "export-audit.md": planText20, "big-items.md": bvOversizedText() });
+  const parsed = parsePlan(planText20, join(dir, "export-audit.md"));
+  expect("ns-build-view.fixture-parses", parsed.parseErrors.length === 0 && parsed.items.length === 20 && parsed.components.length === 6,
+    JSON.stringify({ errors: parsed.parseErrors.slice(0, 2), items: parsed.items.length, components: parsed.components.length }));
+  const viewPath = join(dir, "export-audit.build.md");
+
+  // the 20-item plan: written, every component and item present, within a quarter, in order, nothing else
+  const r1 = runHtml(dir, "--build", "export-audit");
+  const view = existsSync(viewPath) ? readFileSync(viewPath) : Buffer.alloc(0);
+  const v = view.toString("utf8");
+  const planBytes = Buffer.byteLength(planText20, "utf8");
+  const pctFloor = Math.floor((view.length * 100) / planBytes);
+  expect("ns-build-view.written", r1.code === 0 && view.length > 0 && r1.err.length === 0
+    && r1.out.length === 1 && r1.out[0] === "build view: wrote export-audit.build.md · " + pctFloor + " % of the plan",
+    JSON.stringify({ code: r1.code, line: r1.line, out: r1.out, err: r1.err }));
+  const compLines = parsed.sections.Components.filter((l) => l.startsWith("- C"));
+  const missingComps = compLines.filter((l) => !v.split(NEWLINE).includes(l));
+  expect("ns-build-view.every-component", compLines.length === 6 && missingComps.length === 0, "missing: " + missingComps.map((l) => l.slice(0, 8)).join(", "));
+  const missingItems = BV_ITEMS.filter(([t, s, f], k) => !v.split(NEWLINE).includes("- [" + (k < 3 ? "x" : " ") + "] D" + (k + 1) + " · **" + t + "** " + s + " · fails when: " + f));
+  expect("ns-build-view.every-item", missingItems.length === 0, "missing: " + missingItems.map(([t]) => t).join(", "));
+  expect("ns-build-view.quarter", view.length * 4 <= planBytes, view.length + " of " + planBytes + " bytes (" + pctFloor + " %)");
+  const at = (s) => v.indexOf(s);
+  const ns = "**North Star for this plan:** a finance user gets last month's ledger";
+  const risk = "Risk: finance data, user-facing;";
+  expect("ns-build-view.order", at("# Build view: export-audit") === 0 && at("not the source of truth") > 0 && at(ns) > 0 && at(risk) > at(ns)
+    && at("## Components") > at(risk) && at("## Items") > at("## Components") && at("## Build plan") > at("## Items")
+    && at("6. Controller imports September's file") > at("## Build plan"), JSON.stringify([at(ns), at(risk), at("## Components"), at("## Items"), at("## Build plan")]));
+  const headings = v.split(NEWLINE).filter((l) => l.startsWith("## "));
+  expect("ns-build-view.nothing-else", JSON.stringify(headings) === JSON.stringify(["## Components", "## Items", "## Build plan"])
+    && !v.includes("cmd: ") && !v.includes("status →") && !v.includes("| 1 |") && !v.includes("The read replica can lag") && !v.startsWith("---"),
+    JSON.stringify(headings));
+  // the store's readers skip it: still one plan per plan file
+  expect("ns-build-view.not-a-plan", readStore(dir).plans.length === 2, readStore(dir).plans.map((p) => p.slug).join(","));
+
+  // 9.3: a second run gives the same bytes
+  const r2 = runHtml(dir, "--build", "export-audit");
+  const again = existsSync(viewPath) ? readFileSync(viewPath) : Buffer.alloc(0);
+  expect("ns-build-view.byte-identical", r2.code === 0 && again.length > 0 && again.equals(view), again.length + " vs " + view.length + " bytes");
+
+  // the oversized plan: written whole, with one warning naming its share
+  const bigPlan = bvOversizedText();
+  const bigPath = join(dir, "big-items.build.md");
+  const rb = runHtml(dir, "--build", "big-items");
+  const big = existsSync(bigPath) ? readFileSync(bigPath, "utf8") : "";
+  const bigBytes = Buffer.byteLength(big, "utf8");
+  const bigPct = Math.ceil((bigBytes * 100) / Buffer.byteLength(bigPlan, "utf8"));
+  const m = rb.err.length === 1 ? BV_WARNING.exec(rb.err[0]) : null;
+  expect("ns-build-view.oversized-warned", rb.code === 0 && m !== null && Number(m[1]) === bigPct && bigPct > 25 && rb.out.length === 0,
+    JSON.stringify({ code: rb.code, line: rb.line, out: rb.out, err: rb.err, bigPct }));
+  const bigParsed = parsePlan(bigPlan, join(dir, "big-items.md"));
+  const cut = bigParsed.items.filter((it) => !big.includes(it.statement) || !big.includes("end of clause " + it.id.slice(1)));
+  expect("ns-build-view.oversized-whole", bigBytes > 0 && cut.length === 0 && big.includes("1. Write it · advances C1")
+    && big.includes("**Risk appetite:** low; a lost line is not acceptable.") && big.includes("North Star: (none stated)"),
+    "cut item(s): " + cut.map((it) => it.id).join(" ") + " · " + bigBytes + " bytes");
+
+  // an unknown slug is one line, exit 1, and writes nothing
+  const before = readdirSync(dir).sort().join(",");
+  const ru = runHtml(dir, "--build", "no-such-plan");
+  expect("ns-build-view.unknown-slug", ru.code === 1 && ru.line === fmt("noPlan", { slug: "no-such-plan", dir: plainText(dir) })
+    && ru.out.length === 0 && readdirSync(dir).sort().join(",") === before, JSON.stringify({ code: ru.code, line: ru.line }));
+
+  // 8.2: `close` runs `--remove`, which leaves no view behind and is quiet about one already gone
+  const rr = runHtml(dir, "--build", "export-audit", "--remove");
+  const rb2 = runHtml(dir, "--build", "big-items", "--remove");
+  expect("ns-build-view.removed", rr.code === 0 && rr.out[0] === "build view: removed export-audit.build.md" && !existsSync(viewPath)
+    && rb2.code === 0 && !existsSync(bigPath), JSON.stringify({ rr: [rr.code, rr.line, rr.out], rb2: [rb2.code, rb2.line, rb2.out], left: readdirSync(dir) }));
+  const ra = runHtml(dir, "--build", "export-audit", "--remove");
+  expect("ns-build-view.remove-absent", ra.code === 0 && ra.out[0] === "build view: no export-audit.build.md to remove" && existsSync(join(dir, "export-audit.md")),
+    JSON.stringify({ code: ra.code, line: ra.line, out: ra.out }));
 });
 
 const invoked = process.argv[1] && realpathSync(process.argv[1]) === SELF;

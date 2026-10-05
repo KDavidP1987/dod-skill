@@ -18,8 +18,22 @@ jobs:
       # Checker 2: Anthropic's parser. Target is `skills`, not `.` — `.` validates only marketplace.json.
       # --strict turns "passed with warnings" (exit 0 on a missing description) into exit 1.
       - run: npx -y @anthropic-ai/claude-code plugin validate --strict skills
-      # Manifest check (plugin.json / marketplace.json).
-      - run: npx -y @anthropic-ai/claude-code plugin validate --strict .
+      # Manifest check (plugin.json / marketplace.json). Since Claude Code 2.1.289 (2026-10-04) --strict also
+      # fails on "root: CLAUDE.md at the plugin root is not loaded as project context": the marketplace source
+      # "./" makes this lab's root the plugin root, and that CLAUDE.md is the lab's own instructions, not plugin
+      # context. Only that one warning is allowed; any other warning or any error still fails (north-star A1).
+      - shell: bash
+        run: |
+          set -eo pipefail
+          if out=$(npx -y @anthropic-ai/claude-code plugin validate --strict . 2>&1); then echo "$out"; exit 0; fi
+          echo "$out"
+          # Each finding is one "❯" line, and the output has a section per manifest, so count lines, not sections.
+          findings=$(grep -c '❯' <<<"$out" || true)
+          known=$(grep -c '❯ root: CLAUDE.md at the plugin root is not loaded as project context' <<<"$out" || true)
+          if [ "$findings" -eq 1 ] && [ "$known" -eq 1 ] && ! grep -Eq 'Found [0-9]+ errors?' <<<"$out"; then
+            echo "manifest ok: the only warning is the known CLAUDE.md-at-plugin-root one"; exit 0
+          fi
+          echo "manifest check failed beyond the known CLAUDE.md warning"; exit 1
       # Version agreement. Bare on purpose: plugin.json is the source of truth for the
       # plugin version and each SKILL.md for its own, so there is no number to write
       # here that could itself go stale.

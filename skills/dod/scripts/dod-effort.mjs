@@ -10,7 +10,14 @@
 //
 //   node dod-effort.mjs --since <iso> --until <iso> [--cwd <dir>] [--gap <min>]
 //                       [--plan <slug> --package <W<n>.<m>|plan> [--dry-run] [--dir <store>]]
-//   node dod-effort.mjs --selftest [--gating]
+//   node dod-effort.mjs --budget --plan <slug> [--dir <store>] [--cwd <dir>] [--gap <min>]
+//                       [--since <iso>] [--start <iso>] [--until <iso>] [--dry-run]
+//   node dod-effort.mjs --selftest [--gating | --case <name>]
+//
+// --budget (north-star D12) measures a plan's planning-and-review share of its effort: planning (first plan
+// commit → `start` Log line) against build (`start` → `done`, or now), in counted tokens. It prints the share,
+// past 25 % an over-budget line, and writes a `note · budget` Log line that `dod-index.mjs --check` reads; with no
+// session records it prints "unmeasured" and exits 0.
 
 import {
   createReadStream, readdirSync, lstatSync, realpathSync, readFileSync, writeFileSync, mkdtempSync, rmSync,
@@ -23,7 +30,7 @@ import { homedir, tmpdir } from "node:os";
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { fileURLToPath } from "node:url";
-import { parsePlan, checkPlan, writeAtomic, plainText, resolveStore } from "./dod-index.mjs";
+import { parsePlan, checkPlan, writeAtomic, plainText, resolveStore, PLANNING_BUDGET_PCT } from "./dod-index.mjs";
 
 export const SELF = fileURLToPath(import.meta.url);
 
@@ -34,7 +41,9 @@ const MINUTE = 60_000;
 const USAGE =
   "usage: dod-effort.mjs --since <iso> --until <iso> [--cwd <dir>] [--gap <min>]\n" +
   "                      [--plan <slug> --package <W<n>.<m>|plan> [--dry-run] [--dir <store>]]\n" +
-  "       dod-effort.mjs --selftest [--gating]";
+  "       dod-effort.mjs --budget --plan <slug> [--dir <store>] [--cwd <dir>] [--gap <min>]\n" +
+  "                      [--since <iso>] [--start <iso>] [--until <iso>] [--dry-run]\n" +
+  "       dod-effort.mjs --selftest [--gating | --case <name>]";
 
 // Every refusal is one line and exit 1. No message carries a path, a file name or a record's text (D23).
 export class EffortError extends Error {}
@@ -140,9 +149,11 @@ export function sessionFiles(projects, sinceMs, skipped) {
 
 // Reads every file as a stream, line by line (D24): a malformed or truncated line is counted in `skipped`, a
 // record carrying usage but no message id ends the run (the format changed — no figure is better than a wrong one).
+const NO_FOLDER = "the session records folder (<config>/projects) does not exist";
+const NO_RECORDS = "no session records for this folder in the window";
 export async function measure(a, { config, hooks = {} } = {}) {
   const projects = join(config, "projects");
-  if (!existsSync(projects) || !statSync(projects).isDirectory()) fail("the session records folder (<config>/projects) does not exist");
+  if (!existsSync(projects) || !statSync(projects).isDirectory()) fail(NO_FOLDER);
   const folder = resolve(a.cwd ?? process.cwd());
   if (a.cwd !== null && !(existsSync(folder) && statSync(folder).isDirectory())) fail("--cwd is not a folder");
   const skipped = { n: 0 };
@@ -192,7 +203,7 @@ export async function measure(a, { config, hooks = {} } = {}) {
     }
     if (matched) used++;
   }
-  if (!times.length) fail("no session records for this folder in the window");
+  if (!times.length) fail(NO_RECORDS);
   times.sort((x, y) => x - y);
   const gapMs = a.gap * MINUTE;
   let active = 0;
@@ -273,10 +284,118 @@ export async function writeNote(a, note, io, { hooks = {}, check = (p) => checkP
   return 0;
 }
 
+// ---------------------------------------------------------------- the planning budget (north-star D12)
+
+// Business rule 4.1: PLANNING_BUDGET_PCT (25) lives in dod-index.mjs beside the freeze thresholds, so `--check`
+// and this helper read one number. Business rule 4.3: the budget is measured from the plan's first commit to its
+// `start` Log line. The helper spawns no process (10.1), so it cannot ask git for the first commit: the author
+// passes it as --since (`git log --diff-filter=A --format=%aI -- docs/dod/<slug>.md`), else the window opens at
+// the local midnight of the plan's first Log line.
+export const BUDGET_MESSAGES = {
+  share: "planning share: <p> % of measured effort (planning <a> · build <b>)",
+  over: "planning over budget: <p> % (budget <budget> %) — freeze the plan and build",
+  unmeasured: "planning share: unmeasured (<why>)",
+  noRecords: "no session records",
+  noStart: "the plan has no start Log line",
+  emptyPlanning: "the planning window is empty — give --since and --start",
+  emptyBuild: "the build window is empty — give --start",
+  noTokens: "no token counts",
+  sameDay: "the plan started the day it was written — give --since and --start",
+};
+const fmtB = (key, vals = {}) => BUDGET_MESSAGES[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+
+export function parseBudgetArgs(argv, { selftest = false } = {}) {
+  const a = { plan: null, dir: null, cwd: null, gap: GAP_DEFAULT, since: null, start: null, until: null, dryRun: false, config: null };
+  const seen = new Set();
+  for (let i = 0; i < argv.length; i++) {
+    const f = argv[i];
+    if (seen.has(f)) fail(`${plainText(f)} is given twice`);
+    seen.add(f);
+    if (f === "--budget") continue;
+    if (f === "--dry-run") { a.dryRun = true; continue; }
+    const takes = { "--plan": "plan", "--dir": "dir", "--cwd": "cwd", "--gap": "gap", "--since": "since", "--start": "start", "--until": "until", "--config": "config" }[f];
+    if (!takes) fail(`unknown argument ${plainText(f)}\n${USAGE}`);
+    const v = argv[i + 1];
+    if (v === undefined || v.startsWith("--")) fail(`${f} needs a value`);
+    a[takes] = v; i++;
+  }
+  if (a.config !== null && !selftest) fail("--config is accepted only by the selftest");
+  if (a.plan === null) fail(`--budget needs --plan <slug>\n${USAGE}`);
+  if (!SLUG_RE.test(a.plan)) fail(`${plainText(a.plan)} is not a plan slug`);
+  for (const k of ["since", "start", "until"]) {
+    if (a[k] !== null && (!ISO_RE.test(a[k]) || Number.isNaN(Date.parse(a[k])))) fail(`--${k} must be an ISO 8601 time with an offset, such as 2026-10-03T09:00:00-04:00 — got ${plainText(a[k])}`);
+  }
+  if (typeof a.gap === "string") {
+    if (!/^\d{1,3}$/.test(a.gap) || Number(a.gap) < 1 || Number(a.gap) > 120) fail(`--gap must be a whole number of minutes from 1 to 120 — got ${plainText(a.gap)}`);
+    a.gap = Number(a.gap);
+  }
+  return a;
+}
+
+// local midnight of a Log date, `days` later
+const dayMs = (date, days = 0) => { const [y, m, d] = date.split("-").map(Number); return new Date(y, m - 1, d + days).getTime(); };
+const localDate = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+// The two windows (business rule 4.3). Log lines carry dates, not times: without --start the start day counts as
+// planning (the build window opens the next local midnight), so a same-day start reads high, never low; without
+// --until a closed plan's build ends at the midnight after its `done` line, an open one's now.
+export function budgetWindows(plan, text, a, now = Date.now()) {
+  const lines = text.split(/\r?\n/);
+  let first = null;
+  for (let k = lines.findIndex((l) => /^## Log\s*$/.test(l)) + 1; k > 0 && k < lines.length && !/^## /.test(lines[k]); k++) {
+    const m = lines[k].match(/^- (\d{4}-\d{2}-\d{2}) · /);
+    if (m) { first = m[1]; break; }
+  }
+  const start = plan.transitions.find((t) => t.status === "in-progress" && /^start$/.test(t.detail));
+  if (!start && a.start === null) return { why: "noStart" };
+  // a same-day start read from dates alone would count the whole start day, build included, as planning
+  if (/* ns-mutant:budget-same-day */a.since === null && a.start === null && first !== null && first === start.date) return { why: "sameDay" };
+  const last = plan.transitions.at(-1);
+  const sinceMs = a.since !== null ? Date.parse(a.since) : first !== null ? dayMs(first) : null;
+  const startMs = a.start !== null ? Date.parse(a.start) : dayMs(start.date, 1);
+  const untilMs = a.until !== null ? Date.parse(a.until) : last?.status === "done" ? dayMs(last.date, 1) : now;
+  if (sinceMs === null || sinceMs >= startMs) return { why: "emptyPlanning" };
+  if (/* ns-mutant:budget-build */startMs >= untilMs) return { why: "emptyBuild" };
+  return { sinceMs, startMs, untilMs };
+}
+
+const MISSING = new Set([`effort: ${NO_FOLDER}`, `effort: ${NO_RECORDS}`]);
+// one window's counted tokens, or null when it has no session records (6.2: missing records never block)
+async function windowTokens(a, sinceMs, untilMs, config, hooks) {
+  try { return (await measure({ cwd: a.cwd, gap: a.gap, sinceMs, untilMs }, { config, hooks })).tokens; }
+  catch (e) { if (e instanceof EffortError && MISSING.has(e.message)) return null; throw e; }
+}
+
+// the share (counted tokens: input + cache creation + output, as the effort line reports them; cache reads are not
+// counted) and, past the budget, the warning; the note goes in the plan's Log as an effort note does (12.2)
+export async function budget(a, io, { config, hooks = {}, check, now } = {}) {
+  const unmeasured = (why) => { io.log(fmtB("unmeasured", { why: BUDGET_MESSAGES[why] })); return 0; };
+  const store = resolveStore(a.dir ?? undefined);
+  const file = join(store, `${a.plan}.md`);
+  let text;
+  try { text = readFileSync(file, "utf8"); } catch { fail(`no plan ${a.plan} in the store`); }
+  const w = budgetWindows(parsePlan(text, file), text, a, now);
+  if (w.why) return unmeasured(w.why);
+  if (a.cwd !== null && !(existsSync(resolve(a.cwd)) && statSync(resolve(a.cwd)).isDirectory())) fail("--cwd is not a folder");
+  const planning = await windowTokens(a, w.sinceMs, w.startMs, config, hooks);
+  const build = await windowTokens(a, w.startMs, w.untilMs, config, hooks);
+  if (/* ns-mutant:budget-unmeasured */planning === null || build === null) return unmeasured("noRecords");
+  if (planning + build === 0) return unmeasured("noTokens");
+  const p = Math.round((planning * 100) / (planning + build));
+  io.log(fmtB("share", { p, a: `${fmtK(planning)} k tokens`, b: `${fmtK(build)} k tokens` }));
+  if (/* ns-mutant:budget-over */p > PLANNING_BUDGET_PCT) io.log(fmtB("over", { p, budget: PLANNING_BUDGET_PCT }));
+  const note = `- ${localDate(now ?? Date.now())} · note · budget · planning ${p} % of measured effort`;
+  return await writeNote({ plan: a.plan, pkg: "plan", dir: a.dir, dryRun: a.dryRun }, note, io, { hooks, check });
+}
+
 // ---------------------------------------------------------------- main
 
-export async function main(argv, io = console, { selftest = false, hooks = {}, check } = {}) {
+export async function main(argv, io = console, { selftest = false, hooks = {}, check, now } = {}) {
   try {
+    if (argv.includes("--budget")) {
+      const b = parseBudgetArgs(argv, { selftest });
+      return await budget(b, io, { config: b.config ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), hooks, check, now });
+    }
     const a = parseArgs(argv, { selftest });
     const config = a.config ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
     const r = await measure(a, { config, hooks });
@@ -542,6 +661,84 @@ assertion("effort.faults", async (expect) => {
   rmSync(big, { force: true });
 });
 
+// ns-budget (north-star D12): planning against build, in counted tokens; past 25 % the over-budget line; no
+// session records → "unmeasured", exit 0. Times are pinned with --since/--start/--until, or read from the Log.
+function budgetWorld({ planning = null, build = null, log, at = {} } = {}) {
+  const w = world();
+  w.store = join(w.repo, "docs", "dod");
+  w.plan = join(w.store, "fx.md");
+  write(w.plan, PLAN(log ?? ["- 2026-10-01 · status → draft · plan", "- 2026-10-02 · status → in-progress · start"]));
+  const lines = [];
+  if (planning !== null) lines.push(rec({ cwd: w.repo, t: at.planning ?? "2026-10-01T12:00:00Z", text: "plan it" }), rec({ cwd: w.sub, t: at.planning ?? "2026-10-01T12:00:00Z", id: "msg_plan", usage: U(planning, 0, 0, 0) }));
+  if (at.startDay !== undefined) lines.push(rec({ cwd: w.repo, t: at.startDay[0], id: "msg_day", usage: U(at.startDay[1], 0, 0, 0) }));
+  if (build !== null) lines.push(rec({ cwd: w.repo, t: at.build ?? "2026-10-02T12:00:00Z", id: "msg_build", usage: U(0, build / 2, build / 2, 0) }));
+  // a sibling folder's tokens are never counted (D21)
+  lines.push(rec({ cwd: w.sibling, t: "2026-10-01T13:00:00Z", id: "msg_sib", usage: U(900_000, 0, 0, 0) }));
+  session(w, "b.jsonl", lines);
+  return w;
+}
+const BW = ["--since", "2026-10-01T00:00:00Z", "--start", "2026-10-02T00:00:00Z", "--until", "2026-10-03T00:00:00Z"];
+const BUD = (w, ...more) => ["--budget", "--plan", "fx", "--dir", w.store, "--cwd", w.repo, ...more];
+const BUDGET_NOTE = (p) => new RegExp(`^- \\d{4}-\\d{2}-\\d{2} · note · budget · planning ${p} % of measured effort$`);
+
+assertion("ns-budget", async (expect) => {
+  const r = [], info = {};
+  const same = (w, bytes) => readFileSync(w.plan, "utf8") === bytes;
+  // 30 %: the share, the over-budget line and the note, printed; a dry run changes nothing
+  let w = budgetWorld({ planning: 30_000, build: 70_000 });
+  let bytes = readFileSync(w.plan, "utf8");
+  let x = await run(BUD(w, ...BW, "--dry-run"), w, { check: quiet });
+  info.thirty = x.all;
+  r.push(x.code === 0 && x.out[0] === "planning share: 30 % of measured effort (planning 30 k tokens · build 70 k tokens)"
+    && x.out[1] === "planning over budget: 30 % (budget 25 %) — freeze the plan and build" && BUDGET_NOTE(30).test(x.out[2] ?? "") && same(w, bytes));
+  // 20 % and exactly 25 %: no over-budget line
+  for (const [pl, bu] of [[20_000, 80_000], [25_000, 75_000]]) {
+    w = budgetWorld({ planning: pl, build: bu });
+    x = await run(BUD(w, ...BW, "--dry-run"), w, { check: quiet });
+    info[`p${pl}`] = x.all;
+    r.push(x.code === 0 && x.out[0]?.startsWith(`planning share: ${pl / 1000} % `) && !/over budget/.test(x.all));
+  }
+  // no session records — none at all, a missing records folder, or none in one window: "unmeasured", exit 0
+  const UNMEASURED = "planning share: unmeasured (no session records)";
+  for (const [name, o, drop] of [["none", {}, false], ["no-folder", {}, true], ["no-build", { planning: 30_000 }, false], ["no-planning", { build: 70_000 }, false]]) {
+    w = budgetWorld(o);
+    if (drop) rmSync(join(w.config, "projects"), { recursive: true });
+    bytes = readFileSync(w.plan, "utf8");
+    x = await run(BUD(w, ...BW), w);
+    info[name] = x.all;
+    r.push(x.code === 0 && x.out.length === 1 && x.out[0] === UNMEASURED && x.err.length === 0 && same(w, bytes));
+  }
+  // windows read from the Log: the first line's day opens planning, the start day counts as planning, the build
+  // closes at the midnight after `done` — 30 k + 10 k against 60 k is 40 %
+  const local = (d, h) => new Date(2026, 9, d, h).toISOString();
+  w = budgetWorld({
+    planning: 30_000, build: 60_000, at: { planning: local(1, 12), startDay: [local(2, 12), 10_000], build: local(3, 12) },
+    log: ["- 2026-10-01 · status → draft · plan", "- 2026-10-02 · status → ready · approve", "- 2026-10-02 · status → in-progress · start", "- 2026-10-03 · status → done · close"],
+  });
+  x = await run(BUD(w, "--dry-run"), w, { check: quiet });
+  info.fromLog = x.all;
+  r.push(x.code === 0 && x.out[0] === "planning share: 40 % of measured effort (planning 40 k tokens · build 60 k tokens)" && x.out[1]?.startsWith("planning over budget: 40 %"));
+  // started the day it was written, with no times given: unmeasured, never a whole day counted as planning
+  w = budgetWorld({ planning: 30_000, build: 70_000, log: ["- 2026-10-02 · status → draft · plan", "- 2026-10-02 · status → in-progress · start"] });
+  x = await run(BUD(w, "--dry-run"), w);
+  info.sameDay = x.all;
+  r.push(x.code === 0 && x.out[0] === "planning share: unmeasured (the plan started the day it was written — give --since and --start)");
+  // a plan not yet started: unmeasured, exit 0
+  w = budgetWorld({ planning: 30_000, build: 70_000, log: ["- 2026-10-01 · status → draft · plan"] });
+  x = await run(BUD(w), w);
+  info.noStart = x.all;
+  r.push(x.code === 0 && x.out[0] === "planning share: unmeasured (the plan has no start Log line)");
+  // written for real: the note is the last Log line and the real checker finds no new problem
+  w = budgetWorld({ planning: 30_000, build: 70_000 });
+  x = await run(BUD(w, ...BW), w);
+  const kept = readFileSync(w.plan, "utf8").split("\n").filter((l) => / · note · budget · /.test(l));
+  info.written = x.all;
+  r.push(x.code === 0 && kept.length === 1 && BUDGET_NOTE(30).test(kept[0]) && /written as the last line/.test(x.all));
+  // the output names no path, session id or folder (D23)
+  r.push(!/[\\/]|\.jsonl|aaaa1111/.test(Object.values(info).join("\n").replace(/ \/ /g, "")));
+  expect("ns-budget", r.every(Boolean), JSON.stringify({ r, ...info }));
+});
+
 // gating plants (D41): each removes nothing — it states the fault and passes only when the control catches it
 plant("2.1", "the helper reading outside <config>/projects", async () => {
   const w = world(), outside = tempDir("dod-effort-out-");
@@ -593,9 +790,9 @@ plant("12.4", "an empty window reading as a pass", async () => {
   return r.code === 1 && r.out.length === 0;
 });
 
-export async function selftest(io = console, { gating = false } = {}) {
+export async function selftest(io = console, { gating = false, only } = {}) {
   let pass = 0, fired = 0, never = 0;
-  const failed = [];
+  const failed = [], results = [];
   try {
     if (gating) {
       const byProbe = new Map();
@@ -613,7 +810,7 @@ export async function selftest(io = console, { gating = false } = {}) {
       }
       return failed.length ? 1 : 0;
     }
-    const expect = (id, ok, detail = "") => { fired++; if (ok) pass++; else failed.push(`${id}${detail ? ` — ${plainText(String(detail)).slice(0, 300)}` : ""}`); };
+    const expect = (id, ok, detail = "") => { fired++; results.push([id, Boolean(ok)]); if (ok) pass++; else failed.push(`${id}${detail ? ` — ${plainText(String(detail)).slice(0, 300)}` : ""}`); };
     for (const { id, fn } of ASSERTIONS.values()) {
       const before = fired;
       try { await fn(expect); } catch (e) { failed.push(`${id} — threw ${plainText(String(e?.message ?? e))}`); continue; }
@@ -623,6 +820,15 @@ export async function selftest(io = console, { gating = false } = {}) {
     const total = pass + failed.length;
     io.log(`dod-effort selftest: ${pass}/${total} cases${failed.length ? ` (${failed.join(" | ")})` : " (all pass)"}`);
     io.log(`checked ${ASSERTIONS.size} assertions · ${PLANTS.length} plants · ${fired} fired · ${never} never asserted`);
+    // north-star: `--case <name>` runs the whole suite, then answers for the named case alone; an unknown name is a
+    // failure, never a silent pass
+    if (only !== undefined) {
+      const hits = results.filter(([id]) => id === only);
+      if (!hits.length) { io.log(`selftest: no case "${plainText(only)}"`); return 1; }
+      const ok = hits.every(([, x]) => x);
+      io.log(`case ${only}: ${ok ? "pass" : "FAIL"}`);
+      return ok ? 0 : 1;
+    }
     return failed.length ? 1 : 0;
   } finally {
     cleanTemps();
@@ -634,8 +840,10 @@ if (invoked) {
   const args = process.argv.slice(2);
   const done = (c) => { process.exitCode = c; };
   if (args[0] === "--selftest") {
-    if (args.some((a) => !["--selftest", "--gating"].includes(a))) { console.error(USAGE); process.exitCode = 1; }
-    else selftest({ log: (s) => console.log(s), error: (s) => console.error(s) }, { gating: args.includes("--gating") })
+    const k = args.indexOf("--case"), only = k === -1 ? undefined : args[k + 1];
+    const rest = args.filter((a, i) => !(k !== -1 && (i === k || i === k + 1)));
+    if (rest.some((a) => !["--selftest", "--gating"].includes(a)) || (k !== -1 && (only === undefined || only.startsWith("--") || rest.includes("--gating")))) { console.error(USAGE); process.exitCode = 1; }
+    else selftest({ log: (s) => console.log(s), error: (s) => console.error(s) }, { gating: args.includes("--gating"), only })
       .then(done, (e) => { console.error(`effort: ${plainText(String(e?.message ?? e))}`); process.exitCode = 1; });
   } else {
     main(args, { log: (s) => console.log(s), error: (s) => console.error(s) }).then(done);

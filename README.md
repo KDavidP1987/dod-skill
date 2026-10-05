@@ -5,7 +5,7 @@
 
 **Plan the whole feature before your AI agent builds it — then see how much of the work the plan foresaw.**
 
-Version 0.3.2 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Roadmap](skills/dod/ROADMAP.md) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
+Version 0.3.3 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Roadmap](skills/dod/ROADMAP.md) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
 
 <img src="skills/dod/assets/plan-page.png" alt="A plan page written by dod: the pm-views plan, done, 42 of 42 items verified, prediction rate 88 %, with its predicted-against-observed chart" width="100%">
 
@@ -334,7 +334,7 @@ node scripts/dod-index.mjs --list                # every plan, read-only
 node scripts/dod-index.mjs --brief               # one line for a session-start hook; never exits non-zero
 node scripts/dod-index.mjs --profile             # the profile's sections: one line, or every problem (exit 1)
 node scripts/dod-index.mjs --selftest            # prove the checks block known-bad plans and pass a known-good one
-node scripts/dod-index.mjs --migrate <slug> [--dry-run] [--to 1]   # dod 1 → dod 2; --to 1 converts back
+node scripts/dod-index.mjs --migrate <slug> [--dry-run] [--to 1|3]   # dod 1 → dod 2; --to 1 converts back; --to 3 opts an open plan in to rubric 3
 ```
 
 Among what it refuses: a Considered layer with no pointer to an item; a coverage line that disagrees with the
@@ -364,8 +364,11 @@ as one issue on this skill's repository. Off is the default: nothing is sent, as
 
 ## Roadmap <!-- required -->
 
-- **Now — 0.3.2:** the five pages in one look, a short-or-full detail preference, and the fixes found in the field.
-- **Next — 0.3.3:** planning checks learned from field reports — parts that must add up to the whole, and look-alike items.
+- **Now — 0.3.3:** plans sized to the work. A plan says what done looks
+  like (outcomes, the parts the product needs, a design bar, limits such as "under 3 seconds"), never how to
+  code it. Small plans get a light profile, review stops after two or three rounds, and the plan stops growing
+  once the build starts.
+- **Then — 0.3.4:** planning checks learned from field reports — parts that must add up to the whole, and look-alike items.
 - **0.4.0:** a second reviewer from another model family, scoring that sorts a reversal by its cause, hook
   reminders, and the `audit` and `enhance` commands.
 - **1.0 — under consideration:** after 0.4.0, once dod has been used on outside projects with a prediction rate
@@ -427,7 +430,7 @@ tests/trigger-logs/2026-10-03-plan.jsonl            the transcript behind the 0.
 </details>
 
 [![validate](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml/badge.svg)](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml)
-[![plugin 0.3.2](https://img.shields.io/badge/plugin-0.3.2-1F3A5F)](.claude-plugin/plugin.json)
+[![plugin 0.3.3](https://img.shields.io/badge/plugin-0.3.3-1F3A5F)](.claude-plugin/plugin.json)
 [![license MIT](https://img.shields.io/badge/license-MIT-2E7D6B)](LICENSE)
 
 ---

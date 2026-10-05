@@ -26,6 +26,7 @@ transitions must be legal (plan-template.md invariant 6). Read this file before 
 | `in-progress` | `amend` | *(no change)* | kind, ops, layer, why | amendment line; DoD edited to match ops; if `layer:` is a gating probe or ops contain `-Dn` → `review: pending` and a re-review is owed (below) |
 | `in-progress` | *re-review* | *(no change)* | `review: pending` after such an amendment | a new `## Review n` in the reviews file (review.md); if READY: `review:` and `coverage_reviewer` updated, log `note · re-review An · Review n READY`. **Not a transition; `approve` is never run twice.** |
 | `in-progress` | `close` | `done` | every current item `[x]` with a `pass` line; epic: every child `done` | `closed`; `status → done`; `## Report` |
+| `in-progress` | `close` (partial, rubric 3) | `done` | every unverified item waits on the owner; everything else as `close` | `closed`; `status → done · close · partial`; `## Report` naming the waiting items (below) |
 | `draft` `ready` `in-progress` | `cancel` | `cancelled` | one-line reason | `closed`; `status → cancelled · <reason>` |
 | any open | `supersede --by <slug>` | `superseded` | replacement plan exists | `closed`; `status → superseded · by <slug>`; tombstone at top of body |
 | `done` | `reopen` | `in-progress` | the reason, typed like an amendment (usually `defect` or `discovered`) | **two lines, same date, written together:** the amendment `An` under `## Amendments` (the only time `amend` is legal on a `done` plan) and `status → in-progress · reopen An`; `closed: none` |
@@ -49,6 +50,14 @@ user) the three rules of building from a DoD plan:
    (`discovered` when the plan should have caught it; `requested` when the user changed scope).
 3. Do not rewrite `## Baseline`, ever.
 
+Then write the short build view the builder works from:
+`node <skill>/scripts/dod-wbs.mjs --build <slug>` writes `<store>/<slug>.build.md` with the North Star, the risk
+line, the components, every current item with its fails-when, and the Build plan, and nothing else. It is
+generated from the plan and is never the source of truth: change the plan, then run `--build` again (every run
+overwrites it, and two runs on the same plan give the same bytes). It aims at a quarter of the plan's size; a
+larger one is still written whole, with a warning naming its share. `close` removes it. See wbs.md › The build
+view.
+
 When a work package of `## Work breakdown` finishes, record its effort: run
 `node <skill>/scripts/dod-effort.mjs --since <the package's start, ISO 8601 with offset> --until <now> --plan <slug>
 --package <W<n>.<m>>` from the repository's folder. It reads only the time and token counts of this folder's Claude
@@ -56,6 +65,28 @@ Code session records and appends `- <date> · note · effort · <package> · <ac
 measured` as the last Log line (`estimated` when some records could not be read). Work done in a host that keeps no
 such record (Codex, Cursor) gets a line written by hand with `estimated`; a package with no line shows
 "not recorded" on the pages, never 0. A second line for the same package supersedes the first — never edit one.
+
+On a rubric-3 plan, measure the planning budget once the build is under way (Rubric 3 › Planning budget in
+plan-template.md): `node <skill>/scripts/dod-effort.mjs --budget --plan <slug> [--since <first plan commit>]
+[--start <the start commit's time>] [--dry-run]`, from the repository's folder. Planning runs from the plan's first
+commit to its `start` Log line, the build from `start` to `done` (or now). The helper spawns no process, so it cannot
+ask git: pass `--since` from `git log --diff-filter=A --format=%aI -- <store>/<slug>.md` and `--start` from the
+commit that added the `start` line; without them planning opens at midnight of the first Log line's day and the
+start day counts as planning — and a plan started the day it was written prints `unmeasured (the plan started the
+day it was written — give --since and --start)`, since that day would hold build work too. It compares counted tokens (input, cache creation and output, as the effort line;
+cache reads are not counted) and prints:
+
+```
+planning share: <p> % of measured effort (planning <a> k tokens · build <b> k tokens)
+planning over budget: <p> % (budget 25 %) — freeze the plan and build     (only past 25 %)
+- <date> · note · budget · planning <p> % of measured effort
+```
+
+and appends the last line to the Log as an effort note is (`--dry-run` prints it and writes nothing). `--check`
+warns from the latest budget note; it never reads a session record. When either window has no session records it
+prints `planning share: unmeasured (no session records)`, writes nothing and exits 0; likewise `unmeasured (the
+plan has no start Log line)`, `unmeasured (no token counts)` and, when a window is empty, `unmeasured (the planning window is empty — give --since
+and --start)` or `unmeasured (the build window is empty — give --start)`.
 
 ## `status [slug]` — verification without state change
 
@@ -66,8 +97,9 @@ With a slug, for each D-item:
 |---|---|
 | `test` | Runs the project's test command for that file/name if it is recognisable (`npm test`, `pytest`, `go test`, `cargo test`, `node --test`); records `pass`/`fail` with the summary line |
 | `cmd` | Shows the command first. Runs it only if it is a recognisable build/test/lint/read-only command; anything else (writes, network, deploy, `rm`, `curl -X POST`, unknown binaries) is shown and **requires the user's yes**. 5-minute timeout. Output is summarised; secrets are never written to the log |
+| `host-check` | Rubric 3. A check the project already ships: `<name> · <command>`. The command is handled exactly as `cmd` (shown first; anything not recognisably read-only needs the user's yes); records `pass`/`fail` under the check's name |
 | `file` | Checks the path exists (and contains the stated text, if given) |
-| `manual` | Asks the user to perform the steps and report what they observed; records with `who` = the user |
+| `manual` | Asks the user to perform the steps and report what they observed; records with `who` = the user. On a rubric-3 plan with a `delegate:`, the delegate may answer instead, and `who` is the delegate's name — except on an owner-only step (a payment, a credential, an irreversible step, or `owner-only`), which waits for the owner; the builder never records a manual pass (plan-template.md › Rubric 3 › Owner or delegate) |
 
 Then reports:
 - `n/m items verified`, the unverified list, and any `[x]` without evidence (**"checked without
@@ -87,7 +119,9 @@ tracker doing its job, not a state change.
 Six kinds, each with one test that decides it:
 
 - `discovered` — *the plan was wrong or missed something.* **Counts against the prediction rate.** Must
-  name the layer whose probe should have caught it; that is how the rubric improves.
+  name the layer whose probe should have caught it; that is how the rubric improves. At rubric 3 it also names
+  what it changes, `changes: outcome | component | design | limit`; a change of method alone is a
+  `note · method · …` Log line, never scored (plan-template.md › Rubric 3 › Scoring by the North Star).
 - `corrected` — *a planning decision of the user's own, reversed during the build.* Counts exactly as
   `discovered` does, and names its layer or probe too: the plan recorded a decision that did not survive
   contact, and the probe that asked for it is where the next plan can ask better.
@@ -142,7 +176,8 @@ it still does.
 
 ## `close <slug>`
 
-1. Run `status` in full. Any unverified item → **not closed**; list them; stop.
+1. Run `status` in full. Any unverified item → **not closed**; list them; stop. The one exception is a rubric-3
+   plan whose every unverified item waits on the owner: it may close partially (below).
 2. Epic: every child in `## Children` is `done`; otherwise stop and list.
 3. If `review: pending` (a gating-probe or removal amendment re-opened review) → stop; re-review first
    (see `amend`). `approve` is not the answer — the plan is already past `ready`.
@@ -153,12 +188,19 @@ it still does.
    - for every `emergent` amendment — show its `finding:` and ask whether it really could not have been
      foreseen. Unconfirmed, it becomes `discovered`.
 
+   On a rubric-3 plan, also show every `note · method · …` Log line: a change of method is never scored, so the
+   owner confirms each one changed how the product is built and not what it does. One they do not confirm becomes
+   a `discovered` amendment naming what it changes (`changes: outcome | component | design | limit`).
+
    Only then compute the rate.
 5. Set `closed`, `status → done`, write `## Report`, run `--check <slug>` (must pass), regenerate the index.
    Then regenerate the pages: `node <skill>/scripts/dod-wbs.mjs --html <slug>` (the plan page,
    `<store>/<slug>.html`) and `node <skill>/scripts/dod-wbs.mjs --html --dashboard` (`<store>/dod-dashboard.html`),
    and name both files to the user. To show one as a Claude artifact, publish it as a supporting file of the
    artifact, not its main page, so it stays the generated file unchanged (design.md › Do's and Don'ts).
+   Remove the build view: `node <skill>/scripts/dod-wbs.mjs --build <slug> --remove` deletes `<store>/<slug>.build.md`
+   (`build view: removed <slug>.build.md`, or `build view: no <slug>.build.md to remove` when there was none), so
+   nothing generated for the build outlives it.
 6. **Then the feedback step** — after the report is written, never before, and never as part of it. Run
    `node <skill>/scripts/dod-feedback.mjs --profile --dir <store>` (or read the consent yourself) and act
    on the answer the user gave once, at `setup` (setup.md § 3c):
@@ -170,6 +212,27 @@ it still does.
 
    The close is complete before this step and independent of it: a send that fails prints its line, writes
    its own Log note and changes nothing about the closure. Never pass `--yes` without the user's yes.
+
+### Partial close — rubric 3
+
+A plan whose only unverified items wait on the owner — `manual` items whose evidence says `waiting on the owner`,
+such as a proof run only the owner's harness can do — need not stay open for them. `--check` says
+`every unverified item waits on the owner (<ids>) — …` when this is so. Then run the close above with two changes:
+
+- step 5 logs `- <date> · status → done · close · partial` instead of `status → done · close`, and `## Report`
+  lists the waiting items, by id, under the rate;
+- the rate is computed over the verified items: each baseline item still waiting is left out of both sides,
+  `(baseline − waiting) ÷ (baseline − waiting + discovered)`. `--check` prints it, and
+  `done · partial: <k> item(s) wait on the owner — <ids>; the prediction rate counts <b> of <n> baseline items`.
+
+Everything else holds — the review, the excluded-amendment questions, the pages, the build view's removal — and
+the feedback step runs as after any close. Any unverified item that does not wait on the owner still stops the
+close.
+
+When a waiting item passes later, record its `pass` line in the Log as any evidence and tick it `[x]`; the plan
+stays `done` and nothing is reopened. Every reader recomputes the rate from the Log, so it moves without an edit;
+add a dated line to `## Report` with the new rate. Once no item waits, `--check` prints plain `done` and
+`done · partial on <date>: no item waits on the owner any more — the plan reads as complete`.
 
 Two completion numbers, always both:
 - **vs baseline** — `11/12 — D5 removed by A2 (requested)`
@@ -229,6 +292,12 @@ are shown) and is the same dishonesty as mislabelling an amendment.
   `node <skill>/scripts/dod-index.mjs --migrate --to 1 <slug>` on each `dod: 2` plan — it removes titles,
   renames `S-n` back to `A-n` and sets `dod: 1`, in the `## Baseline` copy too — then `--strip-v2` for the other v0.2 forms (it runs the
   `--to 1` step itself on any plan still at `dod: 2`), then `--check` each plan with the older install.
+- **Switching an open plan to rubric 3** is opt-in and happens only when the owner asks:
+  `node <skill>/scripts/dod-index.mjs --migrate --to 3 <slug> [--dry-run]` on a rubric-2 plan that is not done,
+  cancelled or superseded (a closed plan's score is final). It adds `rubric: 3`, a `profile:`, a `risk:` line and a
+  `## Components` skeleton to fill in, logs the switch, keeps the Baseline, evidence, amendments and reviews as they
+  are (the rate does not move), and prints what the plan now owes `--check` (plan-template.md › Rubric 3 ›
+  Switching an old plan). Show the owner the `--dry-run` output first. There is no automatic way back; git is the undo.
 
 ## Siblings in one store
 

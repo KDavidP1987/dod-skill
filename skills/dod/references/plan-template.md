@@ -44,7 +44,11 @@ review: pending
 | `recon_commit` | repo commit the recon read, or `none` | written `commit` before dod 0.3.1, still read; both at once is a problem |
 | `coverage_author` | `a/b layers · c/d probes` or `pending` | applicable layers and probes only (N/A excluded); must equal the Coverage table from `ready` on |
 | `coverage_reviewer` | same shape or `pending` | must equal the latest READY review's coverage line from `ready` on |
-| `review` | `pending` `codex` `subagent` `human` | never `self`; must name the reviewer of the latest READY review |
+| `review` | `pending` `codex` `subagent` `human` | never `self`; must name the reviewer of the latest READY review; ` · converged` (rubric 2 and 3) and ` · frozen` (rubric 3) are the two ways to approve without one |
+| `profile` | `light` `full` — rubric 3, optional | absent: `light` for S, `full` for M, L and Epic, autonomous or not; the owner's choice beats the default (Rubric 3) |
+| `risk` | one sentence — rubric 3 | required on a light plan: the risk the owner accepts, at least 12 characters (Rubric 3) |
+| `delegate` | a name, or `none` — rubric 3, optional | the person who may answer for the owner; must match the latest `note · owner · delegate · <who>` Log line (Rubric 3 › Owner or delegate) |
+| `builder` | a name, or names separated by `,` — rubric 3, optional | who builds the plan; absent: whoever recorded a passing test, cmd, file or host-check line (Rubric 3 › Owner or delegate) |
 
 ## Body — sections in this order
 
@@ -60,6 +64,10 @@ review: pending
 - [ ] D2 · **Lint clean** <verifiable statement> · cmd: <command> → <expected output>
 - [ ] D3 · **Export doc** <verifiable statement> · file: <path that must exist, optionally "contains <text>">
 - [ ] D4 · **One-click export** <verifiable statement> · manual: <steps a person performs and what they must observe>
+
+## Components     (required at rubric 3; see "Rubric 3" below)
+- C1 · **Invoice export** <a part the product is incomplete without, as a result> · D1 D4
+- C2 · **Maintainable code** <statement> · D2 D3
 
 ## Purpose & typical use
 ## Use cases
@@ -79,8 +87,8 @@ review: pending
 ## Failure & observability
 ## Performance
 ## Build plan
-1. <step an agent that has never seen this conversation can execute — paths, commands, schemas> · satisfies D1, D3
-2. <the step that builds a check runs that check's planted fault in the same step and logs `note · planted · D<n> · …`> · satisfies D2
+1. <step an agent that has never seen this conversation can execute — paths, commands, schemas> · advances C1 · satisfies D1, D3
+2. <the step that builds a check runs that check's planted fault in the same step and logs `note · planted · D<n> · …`> · advances C2 · satisfies D2
 ## Work breakdown     (required at rubric 2 for L and Epic; see "Work packages" below)
 - W1 · **<parent title>**
 - W1.1 · **<leaf title>** · items: D1 D3 · steps: 1, 2
@@ -144,17 +152,20 @@ Separator is ` · ` (space, U+00B7 middle dot, space). Never use `·` inside a f
 
 | Thing | Line | Rules |
 |---|---|---|
-| DoD item | `- [ ] Dn · **title** statement · type: detail` | `type` ∈ `test` `cmd` `file` `manual`; `[x]` = checked; IDs never reused; the title is required at `dod: 2` (ID legend) |
+| DoD item | `- [ ] Dn · **title** statement · type: detail` | `type` ∈ `test` `cmd` `file` `manual` (and `host-check` at rubric 3); `[x]` = checked; IDs never reused; the title is required at `dod: 2` (ID legend) |
 | Baseline item | same shape, under `## Baseline` | |
 | Amendment | `- An · YYYY-MM-DD · kind · ops · layer: L · why` | ids sequential from A1, dates valid and non-decreasing. `kind` ∈ `discovered` `corrected` `requested` `emergent` `defect` `external`. `ops` = space-separated `+Dn` `-Dn` `~Dn`, or `—` for none; `+` may not reuse any ID ever used in this plan. `discovered` must give `L` as a layer (`7`) or probe (`7.2`); others may use `—` |
 | Coverage row | `\| n \| Layer \| Considered\|Gap\|N/A \| a/b \| pointer or reason \|` | exactly 15 rows, numbered 1–15 in order, canonical names; `b` **equals** the rubric's probe count for that layer; Considered needs a = b and a pointer that names a real heading (and ≥ 1 D-item for layers 2–14); Gap needs a < b; N/A needs the applicability test as its reason (the script only checks it is there — ≥ 12 chars; the reviewer checks it is true) |
 | Gate line | `Gate — acceptance & testability: passed\|failed …` | in `## Coverage` |
 | Assumption | `- S-n · validated · statement · source: <…>` · `- S-n · reversible · decision · fallback: <…>` · `- S-n · decision-required · statement` (`A-n` at `dod: 1`) | `validated` without `source:` or `reversible` without `fallback:` is a grammar error |
 | Child | `- slug · planned\|in-progress\|done[ · baseline\|An]` | under `## Children`; the origin field is a v0.2 addition |
-| Log — transition | `- YYYY-MM-DD · status → <status> · <command>` | exact commands: `draft · plan`, `ready · approve` (optionally `· review: codex`), `in-progress · start`, `in-progress · reopen An` (An exists, dated on/before), `done · close`, `cancelled · cancel · <reason>`, `superseded · supersede · by <slug>` (slug in the store); dates non-decreasing |
+| Log — transition | `- YYYY-MM-DD · status → <status> · <command>` | exact commands: `draft · plan`, `ready · approve` (optionally `· review: codex`), `in-progress · start`, `in-progress · reopen An` (An exists, dated on/before), `done · close`, `cancelled · cancel · <reason>`, `superseded · supersede · by <slug>` (slug in the store); dates non-decreasing; at rubric 3 also `done · close · partial` (Rubric 3 › Partial close) |
 | Log — evidence | `- YYYY-MM-DD · Dn · pass\|fail · type: detail · commit · who` | `type` must equal the item's type; `commit` = repo commit or `none`; `who` = agent or person |
 | Log — other | `- YYYY-MM-DD · review skipped — <reason>` · `- YYYY-MM-DD · renamed from <slug>` · `- YYYY-MM-DD · note · <text>` | the only other bullets allowed in `## Log` |
 | Log — effort | `- YYYY-MM-DD · note · effort · <W<n>.<m>\|plan> · <m> min\|<h> h <mm> min measured\|estimated · <n> k tokens measured\|estimated` (or `· tokens not recorded`) | a `note`, so `--check` reads it as any note; written by `scripts/dod-effort.mjs` or by hand. The pages read it whole and anchored; the latest line per package wins; a line that does not match is listed under "Effort lines not read" |
+| Log — budget | `- YYYY-MM-DD · note · budget · planning <p> % of measured effort` | a `note`, written by `scripts/dod-effort.mjs --budget`; under rubric 3 the latest one past 25 % is a `--check` warning (Rubric 3 › Planning budget) |
+| Log — delegate | `- YYYY-MM-DD · note · owner · delegate · <who>\|none` · `- YYYY-MM-DD · note · delegate · <who> · <answer>` | `note`s; under rubric 3 the latest owner line must match `delegate:`, and a delegate answer names the delegate (Rubric 3 › Owner or delegate) |
+| Log — method | `- YYYY-MM-DD · note · method · <what changed in how it is built>` | a `note`; a change of method with the promise unchanged, never an amendment and never scored (Rubric 3 › Scoring by the North Star) |
 
 ## Invariants the script enforces (`--check <slug>`; exit 1 on any)
 
@@ -236,8 +247,8 @@ One frontmatter line, `rubric: 2`, turns on everything in this section. Without 
 checks exactly as before. `--strip-v2` takes the line, the four rubric-2 probes and the two new amendment
 kinds back out again (Rollback, below).
 
-**`rubric:`** is optional, `1` or `2`; absent means `1`, and any other value is the problem
-`rubric "<v>" must be 1 or 2`. A rubric-2 plan's Coverage denominators, its `coverage_author` totals and its
+**`rubric:`** is optional, `1`, `2` or `3`; absent means `1`, and any other value is the problem
+`rubric "<v>" must be 1, 2 or 3`. A rubric-2 plan's Coverage denominators, its `coverage_author` totals and its
 gating set all come from rubric 2 — 49 probes, and 9 gating probes (rubric 1's seven plus `12.4` and `14.4`).
 
 **Probe map.** Under rubric 2 a Considered row for layers 2–14 maps every probe of that layer, after the
@@ -500,6 +511,222 @@ Host (D11):
 - <name> appears more than once (names compare case-insensitively)
 - profile.md ## Host: <reason> — skipped
 
+## Rubric 3 — what done is made of
+
+`rubric: 3` keeps everything rubric 2 asks and adds the rules below. A plan says what the finished product must
+accomplish, never how the code does it; the builder chooses the method. Rubric-1 and rubric-2 plans check exactly
+as before, even when they carry a `## Components` section.
+
+**`## Components`** (required). One line per part the product is incomplete without, stated as a result:
+
+```
+- C<n> · **<title>** <statement> · D<n> D<m> …
+```
+
+- every component names at least one D-item that proves it is there;
+- every D-item serves at least one component — an item that serves none is either a missing component or not part
+  of done;
+- every Build plan step names the components it advances: `… · advances C1 C3 · satisfies D2, D5`.
+
+An amendment that adds an item (`+D<n>`) adds it to a component in the same edit. `## Components` is not
+`## Baseline`; it changes with the plan.
+
+**Profile.** `profile: light` or `full`. A plan without the line is light when it is S and full otherwise,
+planned autonomously or not. A light plan carries `risk:` in its frontmatter, and answers
+a probe its brief does not touch in the Coverage probe map as `7.2 not in brief: <reason>` (at least 12
+characters), counted as answered. A gating probe or a layer-10 probe (security, privacy) is never answered that way:
+it needs a real answer even when the brief is silent. A full plan answers every probe.
+
+**Rounds, then freeze.** A light plan has 2 codex or subagent rounds per run, a full plan 3 (rubric 1 and 2: 3).
+After them the plan may be approved with `review: <reviewer> · frozen` on the latest review, a REVISE, with no
+owner note, when every finding of that review that carries `blocks:` is accepted as a risk. A finding that
+`blocks: outcome` is never frozen: change the plan, or take it to the owner. A plan made autonomously had no owner
+in the room, so each frozen risk also needs the owner's or the delegate's Log line,
+`- YYYY-MM-DD · note · accept · Review <k> F<f> · <who>`, dated on or after the review:
+
+```
+- S-<n> · assumed · risk · <the risk accepted, in the reader's words> · finding: Review <k> F<f>
+```
+
+A further codex or subagent round past the profile's cap still needs the owner's round-cap note (Review loop).
+Advice on a READY review (a finding with no `blocks:`) is logged, never amended in:
+`- YYYY-MM-DD · note · deferred · Review <k> F<f> · <what was suggested>`.
+
+**Probe 11.5, the design bar** (layers.md). When layer 11 is Considered, 11.5 maps to an item that checks a
+specific bar (`test:` or `cmd:`) or to a `manual:` item naming its judge (`judge: <who>, against <what>`), or it is
+answered in prose when the surface has no bar.
+
+**Reviews** (review.md › Rubric 3). A blocking finding says `blocks: outcome | component | design | limit`; one that
+does not is dispositioned `advisory by rule`. Every review carries `missing components: none` or a list, and each
+component listed is dispositioned `- M<k> · accepted|rejected · …`. A REVISE left with only advisory findings, and
+with every listed component rejected, stands as READY.
+
+**Build freeze.** From the `status → in-progress · start` Log line the plan's promises are frozen:
+
+- an amendment dated on or after `start` that changes no item's statement or `fails when:` text — no `+D<n>`, no
+  `-D<n>`, and every `~D<n>` leaves the item as `## Baseline` has it, or ops `—` — is a `--check` problem. Log it
+  instead: `- YYYY-MM-DD · note · <what changed>`;
+- the amendment set — the amendments after the latest unscoped READY review dated before the newest of them (a
+  scoped review covers only the amendments it names, so it never starts a new set) — touching 2 or more work
+  packages, or 10 % or more of the baseline items, needs every amendment of the set named by a scoped READY review
+  dated on or after it (`· scope A<n>,A<m>`), or an unscoped READY review dated on or after its newest amendment;
+- a set touching 25 % or more needs an unscoped READY review dated on or after its newest amendment (a scoped one
+  does not count) and a `version` Log line dated on or after its first amendment.
+
+While `review: pending` the owed re-review is a warning; once the plan claims a review, or is done, it is a
+problem. The thresholds are starting values (business rule 4.1), revisited once the plan has measured them.
+
+**Planning budget.** Planning and review should cost at most 25 % of a plan's measured effort. Measure it with
+`dod-effort.mjs --budget --plan <slug>` (lifecycle.md): it compares the tokens spent from the first plan commit to
+the `start` Log line with those spent since, and logs `- YYYY-MM-DD · note · budget · planning <p> % of measured
+effort`. Past 25 %, freeze: stop reviewing and build, and accept what is still open as risks (`· assumed · risk`).
+`--check` warns from the latest budget note and never reads a session record; with no session records the helper
+prints "unmeasured" and nothing blocks. The 25 % is a starting value (business rule 4.1).
+
+**`host-check:` evidence.** An item may cite a check the project already ships instead of a new script:
+
+```
+- [ ] D<n> · **<title>** <statement> · host-check: <name> · <command>
+```
+
+Prefer it over writing a new script whenever such a check exists — a CI job, a lint, the project's own test
+command. Both the name and the command are required; it needs no `fails when:`, because the host check defines its
+own failure. The command still follows the show-then-run rule of a `cmd:` item (lifecycle.md): it is shown first and runs only
+when it is a recognisable build, test, lint or read-only command; anything else needs the user's yes. Its Log
+evidence reads `- YYYY-MM-DD · D<n> · pass · host-check: <name> · <command> · <commit> · <who>`. Rubric 1 and 2 refuse
+the type.
+
+**Owner or delegate.** The owner may let one named person answer for them: `delegate: <who>` in the frontmatter.
+Only the owner names, replaces or withdraws the delegate, by a Log line the field must match — the latest one wins,
+and `none` withdraws:
+
+```
+- YYYY-MM-DD · note · owner · delegate · <who>
+```
+
+The delegate may answer questions, run hands-on checks and accept work within the plan's risk line; whether an
+answer stays within that line is the reviewer's and the owner's call, not the script's. Every answer names who gave
+it: a delegate's answer to a question is `- YYYY-MM-DD · note · delegate · <who> · <answer>`, and a check or an
+acceptance the delegate performed carries the delegate's name as its evidence `who` — never the bare word
+`delegate`. Owner-only steps wait for the owner: an item whose statement or evidence names a payment, a credential
+or an irreversible step, or carries `owner-only`, may not be passed by the delegate. Word such an item so the reader
+sees why it waits.
+
+The builder never reviews or accepts its own work. The builder is `builder: <who>` when the frontmatter names it
+(several names separated by `,`), and otherwise whoever recorded a passing `test`, `cmd`, `file` or `host-check`
+line, the delegate excepted. A review by the builder — its reviewer (`codex`, `subagent`, `human`) or the person a
+review heading names with `· by <who>` (`## Review 3 · 2026-10-06 · human · by kd · …`) — and a `manual` pass
+recorded by the builder are `--check` problems. An owner who runs checks themself sets `builder:`, so their own
+acceptances are not read as the builder's. Rubric 1 and 2 ignore `delegate:`, `builder:` and `· by`.
+
+**Partial close.** An item waits on the owner when it is a `manual` item whose evidence says `waiting on the owner`
+(`manual: waiting on the owner or their delegate; the Log carries …`). When every unverified item waits on the owner,
+`--check` says so, and `close` may record
+
+```
+- YYYY-MM-DD · status → done · close · partial
+```
+
+The frontmatter says `done`; `--check` prints `done · partial` while an item still waits, and lists the waiting
+items beside the rate. The prediction rate counts the verified baseline items only — a baseline item still waiting
+is left out of both sides, `(baseline − waiting) ÷ (baseline − waiting + discovered)` — and `## Report` names every
+waiting item. Feedback may be sent as at any close. A later `pass` on a waiting item is recorded in the Log like
+any evidence, and the item ticked `[x]`: the plan stays done, every reader recomputes the rate from the Log, and
+once no item waits the plan reads as complete — `--check` prints plain `done` and a line saying so. Any other
+unverified item still blocks the close; rubric 1 and 2 refuse `close · partial` as before.
+
+**Scoring by the North Star.** A rubric-3 `discovered` amendment names the outcome, component, design bar or
+completion limit it changes, in its `why`, as a blocking finding carries `blocks:`:
+
+```
+- A4 · 2026-09-18 · discovered · +D14 · layer: 9.3 · changes: outcome · double-submit created two exports
+```
+
+A change of method alone — how the code or a test rig works, every promise unchanged — is not an amendment but a
+Log note, which the prediction rate never reads: `- YYYY-MM-DD · note · method · <what changed in how it is built>`.
+`close` shows the owner every method note (lifecycle.md › close), so relabelling a real change as method is seen.
+
+**Switching an old plan.** Rubric 3 is opt-in for a plan written under rubric 2: nothing switches it unless asked.
+`node <skill>/scripts/dod-index.mjs --migrate --to 3 <slug> [--dry-run]` switches a rubric-2 plan that is not
+closed. It sets `rubric: 3`, adds `profile:` (light for S, full otherwise) and
+`risk: TODO — the risk the owner accepts, in one sentence` unless the plan has them, adds a `## Components`
+skeleton after `## Definition of Done` unless the plan has the section — one component, its title
+`TODO name the parts`, holding every current item until the author splits it into the real parts — and logs
+`- YYYY-MM-DD · note · migrate · rubric 2 → 3 · first <r> review(s) and <a> amendment(s) kept under rubric 2 · added <what>`.
+No other line changes: `## Baseline`, the items, the evidence, the amendments and the reviews file stay
+byte-identical, so the prediction rate is the same after the switch. The reviews and amendments on record at the
+switch are history: the rules above on how a review or an amendment is written (`blocks:`, `missing components:`,
+`changes:`, the build freeze) judge only those recorded after it. The output prints one `migrate <slug>: <line>`
+per line written, then one `migrate <slug>: owes · <problem>` per `--check` problem the switch leaves — the risk
+to state, the components to name, every Build plan step that advances no component (steps get no `advances` of
+their own), probe 11.5 — or `migrate <slug>: owes nothing — --check passes under rubric 3`. The Log prefix
+`note · migrate · rubric 2 → 3` is reserved for that note. Refusals, after the shared ones of `--migrate`
+(ID legend › Migrate, 1–5) — exit 1, one line, nothing written: `migrate: <slug> is already rubric 3` ·
+`migrate: <slug> is <status> — its score is final, so it stays on rubric <n>` (done, cancelled or superseded) ·
+`migrate: <slug> is rubric 1 — only a rubric-2 plan switches to rubric 3; move it to rubric 2 by hand first (plan-template.md · Rubric 2)` ·
+`migrate: <slug> has check problems — fix them first`. A plan not switched checks exactly as before.
+
+The texts `--check` prints:
+
+- `a rubric-3 plan needs a ## Components section — the parts the product is incomplete without (plan-template.md › Rubric 3)`
+- ``Components: line is not `- C<n> · **title** statement · D<n> …`: <text>``
+- `Components: <c> is listed twice`
+- `<c> names no D-item — every component is served by at least one item`
+- `<c> names <d>, which is not a current item`
+- `<d> serves no component — name it on the component it helps complete`
+- ``Build plan step <k> names no component it advances — add `advances C<n> …` ``
+- `Build plan step <k> advances <c>, which is not a component`
+- ``layer 11: probe 11.5 (design bar) maps to <d>, which is neither a check (test or cmd) nor a manual item naming its judge (`judge: <who>`)``
+- ``Review <n>: F<f> is blocking but names no `blocks: outcome | component | design | limit` — disposition it `advisory by rule`, or ask the reviewer what would fail``
+- ``Review <n> has no `missing components:` line — a rubric-3 review answers it: `missing components: none`, or the list``
+- ``Review <n>: missing component M<m> (<name>) has no disposition — `- M<m> · accepted · <change>` or `- M<m> · rejected · <reason>` ``
+- `profile "<v>" must be light or full`
+- ``a light plan needs a `risk:` line in its frontmatter — the risk the owner accepts, in one sentence of at least 12 characters``
+- ``layer <n>: <p> is answered `not in brief`, which only a light plan may do — a full plan answers every probe``
+- ``layer <n>: the `not in brief` reason for <p> is shorter than 12 characters``
+- ``layer <n>: <p> is a gating or layer-10 probe — it needs a real answer, never `not in brief` ``
+- `review: <v> needs rubric: 3`
+- `review: <v> but the latest review is not a codex or subagent REVISE to freeze on`
+- `review: <v> but Review <n> is non-human round <r> of its run — a <profile> plan freezes after <cap>`
+- ``review: <v> but Review <n>'s F<f> blocks and no `· assumed · risk` assumption cites `finding: Review <n> F<f>` ``
+- `review: <v> but Review <n> was by <by>`
+- `review: <v> but Review <n>'s F<f> blocks an outcome, which is never frozen — change the plan, or take it to the owner`
+- ``review: <v> but the plan was made autonomously and Review <n>'s F<f> has no `- YYYY-MM-DD · note · accept · Review <n> F<f> · <who>` from the owner or the delegate``
+- `review: <v> but Review <n> has no reviewer coverage line`
+- ``<id>: `assumed` needs rubric: 3``
+- ``<a> records Review <n> F<f>, an advisory finding of a READY review — log it `note · deferred · Review <n> F<f> · …` instead``
+- ``<a> is dated after `start` and changes no item's statement or fails-when — log it `note · <what changed>` instead of amending``
+- ``amendment set <ids> after `start` touches <k> of <n> items (<p> %) in <w> work package(s) — a scoped re-review is owed: a READY review dated on/after <date>, scoped to <ids> or unscoped``
+- ``amendment set <ids> after `start` touches <k> of <n> items (<p> %) — a full re-review is owed: an unscoped READY review dated on/after <date>; a scoped review does not count``
+- ``amendment set <ids> after `start` touches <k> of <n> items (<p> %) — at 25 % the plan also needs a `version` Log line dated on/after <date>``
+- ``amendment set <ids> after `start` touches <k> of <n> items (<p> %) in <w> work package(s) — awaiting a <kind> re-review`` (a warning)
+- ``<d>: `host-check:` needs `<name> · <command>`, both non-empty — the check the project already ships, then the command that runs it``
+- ``<d>: `host-check:` evidence needs rubric: 3``
+- ``strip <slug>: rubric 3 — left as written; dod 0.3.2 and earlier refuse it by its rubric, and 0.3.3 reads it again``
+- `planning over budget: <slug> logged <p> % (budget <b> %) — freeze the plan and build` (a warning)
+- ``delegate: <who> is not what the latest owner Log line names (<last>) — only the owner names or replaces the delegate: `- YYYY-MM-DD · note · owner · delegate · <who>` ``
+- ``the owner named delegate <who> on <date> but the frontmatter has no `delegate: <who>` — set it, or log `note · owner · delegate · none` ``
+- `<where>: a delegate answer must name who gave it — the plan's delegate is <d>, the line says "<got>"`
+- ``<d> is owner-only (a payment, credential or irreversible step, or `owner-only`) but its pass on <date> was recorded by the delegate <who> — it waits for the owner``
+- `Review <n> is by <who>, who builds this plan — the builder never reviews its own work`
+- `<d> (manual) was accepted on <date> by <who>, who builds this plan — the owner or the delegate accepts it`
+- `done · partial: <k> item(s) wait on the owner — <ids>; the prediction rate counts <b> of <n> baseline items` (information)
+- `done · partial on <date>: no item waits on the owner any more — the plan reads as complete` (information)
+- `done · partial: ## Report does not list waiting item <d>`
+- ``every unverified item waits on the owner (<ids>) — `close` may record `status → done · close · partial` `` (information)
+- ``<a>: a rubric-3 `discovered` amendment names what it changes — `changes: outcome | component | design | limit`; a change of method alone is a Log note: `note · method · <what changed>` ``
+- ``<c> is the skeleton `--migrate --to 3` wrote — split it into the parts the product is incomplete without, each naming its D-items``
+- `` `risk:` still reads TODO — state the risk the owner accepts, in one sentence of at least 12 characters ``
+
+The texts `--migrate --to 3` writes and prints:
+
+- `migrate · rubric 2 → 3 · first <r> review(s) and <a> amendment(s) kept under rubric 2 · added <what>` (the Log note)
+- `migrate: <slug> is <status> — its score is final, so it stays on rubric <n>`
+- `migrate: <slug> is already rubric 3`
+- `migrate: <slug> is rubric 1 — only a rubric-2 plan switches to rubric 3; move it to rubric 2 by hand first (plan-template.md · Rubric 2)`
+- `migrate <slug>: owes · <problem>`
+- `migrate <slug>: owes nothing — --check passes under rubric 3`
+
 ## ID legend
 
 `legend: D item · A amendment · S assumption · F review finding · P proposal · W work package · n.m layer.probe`
@@ -548,7 +775,7 @@ comparison already reads as no change — so an older checker, which compares wh
 line that starts with it, so do not begin your own Log lines with it. `--strip-v2` runs `--to 1` on every `dod: 2` plan first. The reviews file is never written.
 
 Refusals — exit 1, one line, nothing written, and only the first that applies, in this order:
-1. `usage: dod-index.mjs --migrate <slug> [--dry-run] [--to 1|2] [--dir <store>]` — decided from the arguments alone
+1. `usage: dod-index.mjs --migrate <slug> [--dry-run] [--to 1|2|3] [--dir <store>]` — decided from the arguments alone
 2. `migrate: needs Node 20 or later (found <version>) — not written` — before any file is read
 3. `no plan <slug> in <dir>` — a slug outside the slug grammar, or not in the store listing
 4. `migrate: cannot read <path> (<code>) — not written` — the listing or the plan (invalid UTF-8 is `EILSEQ`)
@@ -557,6 +784,9 @@ Refusals — exit 1, one line, nothing written, and only the first that applies,
 7. `migrate: <slug> already uses S-<n> — rename it by hand first` — an `S-n` outside code spans in a section the rename touches
 8. `migrate: <slug> has check problems — fix them first`
 9. `migrate: <slug> has untitled items <ids> — add titles first`
+
+`--to 3` is not a format conversion but the switch to rubric 3: it shares refusals 1–5, then has its own (Rubric 3 ›
+Switching an old plan); it never reads or changes `dod:`.
 
 A write that finds the file changed since it was read retries three times, then
 `migrate: <slug> changed underneath — not written`; any other write error is `migrate: <slug> failed (<code>) — not written`.

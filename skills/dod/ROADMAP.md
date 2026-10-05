@@ -6,6 +6,18 @@ the [README](README.md#roadmap).
 
 ## Shipped
 
+- **0.3.3 — plans sized to the work.** Built from field reports where dod cost more than the app it planned. A
+  definition of done says what the finished product must accomplish, never how the code does it:
+  - a review finding blocks only when an outcome, a needed part, the design bar or a completion limit would
+    fail, and every review asks which parts are missing;
+  - a plan lists its components, and every item and build step serves one;
+  - a design-bar question: a check for a specific look, a named judge for a qualitative one;
+  - a light profile by default for small (S) plans, full depth for M and up, with a stated risk, and two review rounds (three
+    for a full plan) before the plan freezes with its accepted risks;
+  - after the build starts, small fixes are notes, larger changes trigger a scoped or a full re-review;
+  - a planning budget, a delegate who may answer for the owner, and a partial close when only the owner's
+    steps are left;
+  - plans written before 0.3.3 keep their rules, and can opt in to the new ones.
 - **0.3.2 — the public launch.** The five pages in one look (the plan page, the review page, the project
   dashboard, the self-audit and the cross-project benchmark), measured effort per work package, a short-or-full
   detail preference beside the reading levels, and the fixes reported from real use.
@@ -15,7 +27,7 @@ the [README](README.md#roadmap).
   opt-in feedback loop.
 - **0.1 — the first release.** Fifteen layers, independent review, the frozen baseline, the prediction rate.
 
-## Next
+## 0.3.4
 
 - `probe-fixes` — planning checks learned from field reports: a plan's parts that must add up to the whole, a
   reconciliation item that proves they do, look-alike items that should be one, and a list of field probes

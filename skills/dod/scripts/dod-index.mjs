@@ -43,9 +43,11 @@ const LAYERS = [
 export const RUBRIC = {
   1: { counts: [3, 3, 4, 4, 3, 3, 3, 2, 3, 4, 3, 3, 2, 3, 2], gating: ["2.1", "3.3", "4.4", "6.2", "10.1", "10.3", "14.3"] },
   2: { counts: [3, 3, 4, 5, 3, 3, 3, 2, 3, 4, 4, 4, 2, 4, 2], gating: ["2.1", "3.3", "4.4", "6.2", "10.1", "10.3", "12.4", "14.3", "14.4"] },
+  // north-star D5: rubric 3 adds 11.5 (design bar); its review findings block only by `blocks:` (D1, below)
+  3: { counts: [3, 3, 4, 5, 3, 3, 3, 2, 3, 4, 5, 4, 2, 4, 2], gating: ["2.1", "3.3", "4.4", "6.2", "10.1", "10.3", "12.4", "14.3", "14.4"] },
 };
-const RUBRICS = ["1", "2"];
-const rubricOf = (plan) => (plan?.fm?.rubric === "2" ? 2 : 1);
+const RUBRICS = ["1", "2", "3"];
+const rubricOf = (plan) => (plan?.fm?.rubric === "3" ? 3 : plan?.fm?.rubric === "2" ? 2 : 1);
 const probeCounts = (r) => RUBRIC[r].counts;
 const probeIds = (r, layer) => Array.from({ length: RUBRIC[r].counts[layer - 1] }, (_, i) => `${layer}.${i + 1}`);
 const gatingOf = (r) => RUBRIC[r].gating;
@@ -63,7 +65,7 @@ export const MESSAGES_READABILITY = {
   untitled: "D<n> has no title",
   assumptionA: "Assumptions: A-<n> must be S-<n> under dod: 2",
   assumptionS: "Assumptions: S-<n> needs dod: 2 — run --migrate",
-  usage: "usage: dod-index.mjs --migrate <slug> [--dry-run] [--to 1|2] [--dir <store>]",
+  usage: "usage: dod-index.mjs --migrate <slug> [--dry-run] [--to 1|2|3] [--dir <store>]",
   nodeOld: "migrate: needs Node 20 or later (found <version>) — not written",
   noPlan: "no plan <slug> in <dir>",
   cannotRead: "migrate: cannot read <path> (<code>) — not written",
@@ -87,7 +89,7 @@ export const fmtR = (key, vals = {}) => MESSAGES_READABILITY[key].replace(/<([a-
 // plan-accuracy: every problem and warning text this child adds; placeholders are <name> and are filled by fmtA.
 // plan-template.md carries the same texts, and selftest case template-sync-accuracy compares the two lists.
 export const MESSAGES_ACCURACY = {
-  rubricValue: 'rubric "<v>" must be 1 or 2',
+  rubricValue: 'rubric "<v>" must be 1, 2 or 3',
   probeUnmapped: "layer <n>: probe <p> is not mapped to a D-item or a prose reason",
   probeProseGating: "layer <n>: gating probe <p> cannot be answered by prose",
   probeProseShort: "layer <n>: prose reason for <p> is shorter than 12 characters",
@@ -157,27 +159,40 @@ const CMD = {
 const LEGAL = { draft: [null], ready: ["draft"], "in-progress": ["ready", "done"], done: ["in-progress"], cancelled: ["draft", "ready", "in-progress"], superseded: ["draft", "ready", "in-progress"] };
 
 const RE = {
-  item: /^- \[( |x|X)\] (D\d+) · (.+?) · (test|cmd|file|manual): (.*)$/,
+  // north-star D11: `host-check: <name> · <command>` cites a check the project already ships (rubric 3 only)
+  item: /^- \[( |x|X)\] (D\d+) · (.+?) · (test|cmd|file|manual|host-check): (.*)$/,
   amendment: /^- (A\d+) · (\d{4}-\d{2}-\d{2}) · (discovered|corrected|requested|emergent|defect|external) · (.+?) · layer: ([^·]+?) · (?:package: (W\d+\.\d+) · )?(?:reworks: (A\d+) · )?(.+)$/,
   // a parent package has a title and nothing else; a leaf carries both `items:` and `steps:`, each non-empty
   package: /^- (W\d+(?:\.\d+)?) · \*\*([^*·]{1,40})\*\*(?: · items: (D\d+(?: D\d+)*) · steps: (\d+(?:, ?\d+)*))?\s*$/,
   step: /^(\d+)\. \S/,
+  // north-star D3: a component line, and the components a Build plan step says it advances
+  component: /^- (C\d+) · \*\*([^*]{1,80})\*\*(.*)$/,
+  advances: /\badvances ((?:C\d+)(?:[ ,]+C\d+)*)/,
+  // north-star D8: `- S-<n> · assumed · risk · <text> · finding: Review <k> F<f>`
+  assumedRisk: /^risk · \S.* · finding: Review (\d+) F(\d+)\s*$/,
   op: /^([+~-])(D\d+)$/,
   transition: /^- (\d{4}-\d{2}-\d{2}) · status → ([a-z-]+)(?: · (.*))?$/,
-  evidence: /^- (\d{4}-\d{2}-\d{2}) · (D\d+) · (pass|fail) · (test|cmd|file|manual): (.+?) · ([^·]+?) · ([^·]+?)$/,
+  evidence: /^- (\d{4}-\d{2}-\d{2}) · (D\d+) · (pass|fail) · (test|cmd|file|manual|host-check): (.+?) · ([^·]+?) · ([^·]+?)$/,
   child: /^- ([a-z0-9]+(?:-[a-z0-9]+)*) · (planned|in-progress|done)(?: · (baseline|A\d+))?\s*$/,
   version: /^- (\d{4}-\d{2}-\d{2}) · version · v([A-Za-z0-9][A-Za-z0-9._-]*)(?: ·(?: ([^\n]*?))?)?\s*$/,
   versionStart: /^- \d{4}-\d{2}-\d{2} · version ·/,
   audit: /^- (\d{4}-\d{2}-\d{2}) · audit · ([a-z0-9]{6}) · (\d+)\/(\d+) verified · (\d+) stale · (\d+) unaccounted\s*$/,
   auditStart: /^- \d{4}-\d{2}-\d{2} · audit ·/,
   proposed: /^- P-(\d+) · ([^·]+?) · (.+?) · (.+)$/,
-  assumption: /^- ([AS]-\d+) · (validated|reversible|decision-required) · (.+)$/,
+  assumption: /^- ([AS]-\d+) · (validated|reversible|decision-required|assumed) · (.+)$/,
   coverage: /^\| (\d{1,2}) \| ([^|]+?) \| (Considered|Gap|N\/A) \| ([^|]*?) \| ([^|]*?) \|\s*$/,
   gate: /^Gate — acceptance & testability: (passed|failed)\b/,
   verdict: /^VERDICT: (READY|REVISE)\s*$/,
   reviewHead: /^## Review (\d+) · (\d{4}-\d{2}-\d{2}) · (codex|subagent|human)\b/,
   finding: /^(?:\d+\.\s*|-\s*)?\**F(\d+)\b/,
   disposition: /^- F(\d+) · (accepted|rejected) · /,
+  // north-star D4: the reviewer's components sweep, and the author's disposition of each component it names
+  missingLine: /^missing components:\s*(.*)$/i,
+  dispositionM: /^- M(\d+) · (accepted|rejected) · /,
+  // north-star D1: what a rubric-3 blocking finding says would fail
+  blocksTag: /\bblocks:\s*`?(outcome|component|design|limit)\b/i,
+  // north-star D15: what a rubric-3 discovered amendment changes
+  changesTag: /\bchanges:\s*`?(outcome|component|design|limit)\b/i,
   coverageLine: /^(\d+)\/(\d+) layers · (\d+)\/(\d+) probes$/,
   // review-loop D1: a probe token is <layer>.<probe> — layer 1–15, probe 1–5 — with no letter, digit or "." on
   // either side, so a version string (v0.3.1) or a dotted section number (1.2.3) never reads as a probe
@@ -204,7 +219,7 @@ const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.par
 // ---------------------------------------------------------------- parsing
 
 export function parsePlan(text, file = "<memory>") {
-  const plan = { file, slug: basename(file, ".md"), fm: {}, kind: "feature", sections: {}, headings: [], items: [], baseline: [], amendments: [], transitions: [], evidence: [], children: [], assumptions: [], coverage: [], gate: null, parseErrors: [], limitWarnings: [], limitProblems: [], reviews: [], versions: [], audits: [], proposed: [], notes: [], dryRuns: [], dryRunMalformed: [], packages: [], steps: [], hasWbs: false };
+  const plan = { file, slug: basename(file, ".md"), fm: {}, kind: "feature", sections: {}, headings: [], items: [], baseline: [], amendments: [], transitions: [], evidence: [], children: [], assumptions: [], coverage: [], gate: null, parseErrors: [], limitWarnings: [], limitProblems: [], reviews: [], versions: [], audits: [], proposed: [], notes: [], dryRuns: [], dryRunMalformed: [], packages: [], steps: [], hasWbs: false, components: [], componentBad: [], hasComponents: false, stepLines: new Map() };
   if (Buffer.byteLength(text) > LIMITS.bytes) plan.limitWarnings.push("plan exceeds 1 MB");
   // plan-limits D1: a line over the cap is a problem and is parsed AS WRITTEN. It used to be blanked with a warning,
   // which silently dropped any D-item on it — the plan went on checking with one item fewer and nobody was told.
@@ -254,7 +269,19 @@ export function parsePlan(text, file = "<memory>") {
     if (leaf && !/^W\d+\.\d+$/.test(m[1])) { plan.parseErrors.push(`Work breakdown: ${m[1]} carries items and steps, so it is a leaf and needs a W<n>.<m> id: ${l.slice(0, 50)}`); continue; }
     plan.packages.push({ id: m[1], title: m[2], leaf, items: leaf ? m[3].split(" ") : [], steps: leaf ? m[4].split(",").map((s) => Number(s.trim())) : [] });
   }
-  for (const l of sec("Build plan")) { const m = l.match(RE.step); if (m) plan.steps.push(Number(m[1])); }
+  for (const l of sec("Build plan")) { const m = l.match(RE.step); if (m) { plan.steps.push(Number(m[1])); plan.stepLines.set(Number(m[1]), l); } }
+  // north-star D3: `- C<n> · **title** statement · D<n> …` — the parts done is made of. Parsed for every plan, checked
+  // under rubric 3 only, so a rubric-1 or rubric-2 plan that happens to carry the section checks as before (D6).
+  plan.hasComponents = "Components" in plan.sections;
+  plan.autonomous = lines.some((l) => /^\*\*Planned:\*\*\s+autonomously\b/i.test(l));
+  for (const l of sec("Components")) {
+    if (!/^- /.test(l)) continue;
+    const m = l.match(RE.component);
+    if (!m) { plan.componentBad.push(l); continue; }
+    const tail = m[3].split(" · ").map((x) => x.trim());
+    const last = tail.length > 1 && /^D\d+(?:[ ,]+D\d+)*$/.test(tail.at(-1)) ? tail.at(-1) : "";
+    plan.components.push({ id: m[1], title: m[2], items: last ? last.split(/[ ,]+/) : [] });
+  }
   let seq = 0;
   for (const l of sec("Log")) {
     let m = l.match(RE.transition); if (m) { plan.transitions.push({ seq: seq++, date: m[1], status: m[2], detail: m[3] ?? "" }); continue; }
@@ -277,7 +304,9 @@ export function parsePlan(text, file = "<memory>") {
     if (!m) { if (/^- /.test(l)) bad("Assumptions", l); continue; }
     if (m[2] === "validated" && !/ · source: \S/.test(m[3])) bad("Assumptions", l, "  (validated needs ` · source: <path / doc / who confirmed>`)");
     if (m[2] === "reversible" && !/ · fallback: \S/.test(m[3])) bad("Assumptions", l, "  (reversible needs ` · fallback: <what changes if wrong>`)");
-    plan.assumptions.push({ id: m[1], type: m[2] });
+    // north-star D8: an accepted risk at the freeze names the finding it accepts
+    if (m[2] === "assumed" && !RE.assumedRisk.test(m[3])) bad("Assumptions", l, "  (assumed needs `risk · <the risk accepted> · finding: Review <n> F<f>`)");
+    plan.assumptions.push({ id: m[1], type: m[2], text: m[3] });
   }
   for (const l of sec("Coverage")) {
     const m = l.match(RE.coverage);
@@ -297,7 +326,7 @@ export function parseReviews(text) {
   for (const l of text.split(/\r?\n/)) {
     lineNo++;
     let m = l.match(RE.reviewHead);
-    if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), tags: new Map(), probes: new Map(), earlier: null, coverage: null, ...headFields(l) }); inDisp = false; block = null; continue; }
+    if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), tags: new Map(), probes: new Map(), earlier: null, coverage: null, missing: null, mDispositions: new Set(), mRejected: new Set(), dispText: new Map(), ...headFields(l) }); inDisp = false; block = null; continue; }
     if (!reviews.length) continue;
     const r = reviews.at(-1);
     // field-fixes D4, A1: a VERDICT not alone on its line is glued — unless it is quoted in backticks or double quotes
@@ -305,8 +334,15 @@ export function parseReviews(text) {
     if (/^### Dispositions/.test(l)) { inDisp = true; block = null; continue; }
     m = l.match(RE.verdict); if (m) { r.verdict = m[1]; block = null; continue; }
     m = l.match(RE.coverageLine); if (m) { r.coverage = l.trim(); block = null; continue; }
-    if (inDisp) { m = l.match(RE.disposition); if (m) { r.dispositions.add(m[1]); if (m[2] === "rejected") r.rejected.add(m[1]); } continue; }
+    if (inDisp) {
+      m = l.match(RE.disposition); if (m) { r.dispositions.add(m[1]); r.dispText.set(m[1], l); if (m[2] === "rejected") r.rejected.add(m[1]); }
+      m = l.match(RE.dispositionM); if (m) { r.mDispositions.add(m[1]); if (m[2] === "rejected") r.mRejected.add(m[1]); }
+      continue;
+    }
     if (/^EARLIER:/.test(l)) { r.earlier = l.trim(); block = null; continue; }
+    // north-star D4: `missing components: none`, or the components the reviewer found missing, `;`- or `,`-separated
+    m = l.match(RE.missingLine);
+    if (m) { const v = m[1].trim().replace(/\.$/, ""); r.missing = /^none$/i.test(v) ? [] : v.split(/\s*[;,]\s*/).filter(Boolean); block = null; continue; }
     // a finding's block runs from its Fn line to the line before the next finding, coverage or VERDICT line: what
     // the reviewer wrote about it, which D7 reads for gating-probe tokens
     m = l.match(RE.finding);
@@ -330,7 +366,9 @@ export function headFields(line) {
     m = f.match(/^(\d+) items$/); if (m) { items = Number(m[1]); return; }
     m = f.match(/^files (\d+)$/); if (m) { const h = fields[k + 1]?.match(/^([0-9a-f]{12})$/); out.files = { k: Number(m[1]), hash: h ? h[1] : null }; return; }
     m = f.match(/^prompt ([0-9a-f]{12})$/); if (m) { out.prompt = m[1]; return; }
-    m = f.match(/^scope (A\d+(?:,\s?A\d+)*)$/); if (m) out.scope = m[1].split(",").map((x) => x.trim());
+    m = f.match(/^scope (A\d+(?:,\s?A\d+)*)$/); if (m) { out.scope = m[1].split(",").map((x) => x.trim()); return; }
+    // north-star D13: `by <who>` names the person behind a review (a human review); only rubric 3 reads it
+    m = f.match(/^by (\S.*)$/); if (m) out.by = m[1].trim();
   });
   if (bytes !== null && items !== null) out.stamp = { bytes, items };
   return out;
@@ -378,6 +416,275 @@ export const MESSAGES_REVIEW = {
   overCap: "over the 200-citation cap",
 };
 export const fmtV = (key, vals = {}) => MESSAGES_REVIEW[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+
+// north-star: every problem text rubric 3 adds; placeholders are <name>, filled by fmtN. A rubric-1 or rubric-2
+// plan never reaches any of them (D6).
+export const MESSAGES_NS = {
+  blocksMissing: "Review <n>: F<f> is blocking but names no `blocks: outcome | component | design | limit` — disposition it `advisory by rule`, or ask the reviewer what would fail",
+  missingLine: "Review <n> has no `missing components:` line — a rubric-3 review answers it: `missing components: none`, or the list",
+  missingUndisposed: "Review <n>: missing component M<m> (<name>) has no disposition — `- M<m> · accepted · <change>` or `- M<m> · rejected · <reason>`",
+  designBarItem: "layer 11: probe 11.5 (design bar) maps to <d>, which is neither a check (test or cmd) nor a manual item naming its judge (`judge: <who>`)",
+  componentsMissing: "a rubric-3 plan needs a ## Components section — the parts the product is incomplete without (plan-template.md › Rubric 3)",
+  componentLine: "Components: line is not `- C<n> · **title** statement · D<n> …`: <text>",
+  componentDuplicate: "Components: <c> is listed twice",
+  componentEmpty: "<c> names no D-item — every component is served by at least one item",
+  componentUnknownItem: "<c> names <d>, which is not a current item",
+  itemOrphan: "<d> serves no component — name it on the component it helps complete",
+  stepNoComponent: "Build plan step <k> names no component it advances — add `advances C<n> …`",
+  stepUnknownComponent: "Build plan step <k> advances <c>, which is not a component",
+  profileValue: 'profile "<v>" must be light or full',
+  riskMissing: "a light plan needs a `risk:` line in its frontmatter — the risk the owner accepts, in one sentence of at least 12 characters",
+  notInBriefFull: "layer <n>: <p> is answered `not in brief`, which only a light plan may do — a full plan answers every probe",
+  notInBriefShort: "layer <n>: the `not in brief` reason for <p> is shorter than 12 characters",
+  notInBriefGating: "layer <n>: <p> is a gating or layer-10 probe — it needs a real answer, never `not in brief`",
+  frozenRubric: "review: <v> needs rubric: 3",
+  frozenNone: "review: <v> but the latest review is not a codex or subagent REVISE to freeze on",
+  frozenRound: "review: <v> but Review <n> is non-human round <r> of its run — a <profile> plan freezes after <cap>",
+  frozenRisk: "review: <v> but Review <n>'s F<f> blocks and no `· assumed · risk` assumption cites `finding: Review <n> F<f>`",
+  frozenReviewer: "review: <v> but Review <n> was by <by>",
+  frozenOutcome: "review: <v> but Review <n>'s F<f> blocks an outcome, which is never frozen — change the plan, or take it to the owner",
+  frozenUnaccepted: "review: <v> but the plan was made autonomously and Review <n>'s F<f> has no `- YYYY-MM-DD · note · accept · Review <n> F<f> · <who>` from the owner or the delegate",
+  frozenCoverage: "review: <v> but Review <n> has no reviewer coverage line",
+  assumedRubric: "<id>: `assumed` needs rubric: 3",
+  advisoryAmendment: "<a> records Review <n> F<f>, an advisory finding of a READY review — log it `note · deferred · Review <n> F<f> · …` instead",
+  freezePromise: "<a> is dated after `start` and changes no item's statement or fails-when — log it `note · <what changed>` instead of amending",
+  freezeScoped: "amendment set <ids> after `start` touches <k> of <n> items (<p> %) in <w> work package(s) — a scoped re-review is owed: a READY review dated on/after <date>, scoped to <ids> or unscoped",
+  freezeFull: "amendment set <ids> after `start` touches <k> of <n> items (<p> %) — a full re-review is owed: an unscoped READY review dated on/after <date>; a scoped review does not count",
+  freezeVersion: "amendment set <ids> after `start` touches <k> of <n> items (<p> %) — at 25 % the plan also needs a `version` Log line dated on/after <date>",
+  freezeAwaiting: "amendment set <ids> after `start` touches <k> of <n> items (<p> %) in <w> work package(s) — awaiting a <kind> re-review",
+  hostCheckForm: "<d>: `host-check:` needs `<name> · <command>`, both non-empty — the check the project already ships, then the command that runs it",
+  hostCheckRubric: "<d>: `host-check:` evidence needs rubric: 3",
+  stripRubric3: "strip <slug>: rubric 3 — left as written; dod 0.3.2 and earlier refuse it by its rubric, and 0.3.3 reads it again",
+  budgetOver: "planning over budget: <slug> logged <p> % (budget <b> %) — freeze the plan and build",
+  delegateUnlogged: "delegate: <who> is not what the latest owner Log line names (<last>) — only the owner names or replaces the delegate: `- YYYY-MM-DD · note · owner · delegate · <who>`",
+  delegateNotSet: "the owner named delegate <who> on <date> but the frontmatter has no `delegate: <who>` — set it, or log `note · owner · delegate · none`",
+  delegateAuthor: "<where>: a delegate answer must name who gave it — the plan's delegate is <d>, the line says \"<got>\"",
+  delegateOwnerOnly: "<d> is owner-only (a payment, credential or irreversible step, or `owner-only`) but its pass on <date> was recorded by the delegate <who> — it waits for the owner",
+  builderReviews: "Review <n> is by <who>, who builds this plan — the builder never reviews its own work",
+  builderAccepts: "<d> (manual) was accepted on <date> by <who>, who builds this plan — the owner or the delegate accepts it",
+  partialWaiting: "done · partial: <k> item(s) wait on the owner — <ids>; the prediction rate counts <b> of <n> baseline items",
+  partialComplete: "done · partial on <date>: no item waits on the owner any more — the plan reads as complete",
+  partialReport: "done · partial: ## Report does not list waiting item <d>",
+  partialReady: "every unverified item waits on the owner (<ids>) — `close` may record `status → done · close · partial`",
+  changesMissing: "<a>: a rubric-3 `discovered` amendment names what it changes — `changes: outcome | component | design | limit`; a change of method alone is a Log note: `note · method · <what changed>`",
+  // north-star D27: `--migrate --to 3` — the placeholders it writes, its Log note, its refusals and what it reports
+  componentTodo: "<c> is the skeleton `--migrate --to 3` wrote — split it into the parts the product is incomplete without, each naming its D-items",
+  riskTodo: "`risk:` still reads TODO — state the risk the owner accepts, in one sentence of at least 12 characters",
+  migrateNote: "migrate · rubric 2 → 3 · first <r> review(s) and <a> amendment(s) kept under rubric 2 · added <what>",
+  migrateFinal: "migrate: <slug> is <status> — its score is final, so it stays on rubric <n>",
+  migrateRubric3: "migrate: <slug> is already rubric 3",
+  migrateRubric1: "migrate: <slug> is rubric 1 — only a rubric-2 plan switches to rubric 3; move it to rubric 2 by hand first (plan-template.md · Rubric 2)",
+  migrateOwes: "migrate <slug>: owes · <problem>",
+  migrateClean: "migrate <slug>: owes nothing — --check passes under rubric 3",
+};
+// north-star D27: what `--migrate --to 3` writes. The skeleton component holds every current item until the author
+// splits it; its title and the risk placeholder both start with TODO, which `--check` reports under rubric 3.
+export const SKELETON_TITLE = "TODO name the parts";
+export const SKELETON_STATEMENT = "every current item, until the parts the product is incomplete without are named";
+export const RISK_TODO = "TODO — the risk the owner accepts, in one sentence";
+// a plan in one of these states has its score on record; `--migrate --to 3` never switches it
+const FINAL_STATUSES = ["done", "cancelled", "superseded"];
+// the switch note `--migrate --to 3` logs: the reviews and amendments on record at the switch are history — the
+// rubric-3 rules on how a review or an amendment is written (blocks:, missing components:, changes:, the build
+// freeze) judge only those recorded after it, so a switched plan never has to rewrite what it already scored
+export const SWITCH_NOTE_RE = /^migrate · rubric 2 → 3 · first (\d+) review\(s\) and (\d+) amendment\(s\) kept under rubric 2 · /;
+export function keptUnderRubric2(plan) {
+  if (rubricOf(plan) !== 3) return { reviews: 0, amendments: 0 };
+  const m = plan.notes.map((x) => x.text.match(SWITCH_NOTE_RE)).find(Boolean);
+  return m ? { reviews: Number(m[1]), amendments: Number(m[2]) } : { reviews: 0, amendments: 0 };
+}
+// north-star D12, business rule 4.1: the planning budget — planning and review as a share of a plan's measured
+// effort (planning ÷ (planning + build)), in percent. A reversible starting value, revisited after D22. Past it,
+// `--check` warns from the latest budget note dod-effort.mjs logged; `--check` never reads a session record.
+export const PLANNING_BUDGET_PCT = 25;
+// the note dod-effort.mjs writes: `- <date> · note · budget · planning <p> % of measured effort`
+export const BUDGET_NOTE_RE = /^budget · planning (\d{1,3}) % of measured effort$/;
+export function budgetWarnings(plan) {
+  if (rubricOf(plan) !== 3) return [];
+  const last = plan.notes.filter((x) => BUDGET_NOTE_RE.test(x.text)).at(-1);
+  if (!last) return [];
+  const p = Number(last.text.match(BUDGET_NOTE_RE)[1]);
+  return /* ns-mutant:budget-check */p > PLANNING_BUDGET_PCT ? [fmtN("budgetOver", { slug: plan.slug, p, b: PLANNING_BUDGET_PCT })] : [];
+}
+// north-star D9, business rule 4.1: the re-review thresholds of the build freeze, in percent of the baseline items.
+// Reversible starting values, revisited after D22.
+export const FREEZE_SCOPED_PCT = 10;
+export const FREEZE_FULL_PCT = 25;
+// north-star D9: an item's promise — its statement and its `fails when:` text
+const failsWhenOf = (it) => it.detail.match(/fails when:([\s\S]*)$/)?.[1].trim() ?? null;
+export function freezeProblems(plan, { approvals, review, status }) {
+  const problems = [], warnings = [];
+  const start = plan.transitions.find((t) => t.status === "in-progress" && CMD.start.test(t.detail));
+  if (!start) return { problems, warnings };
+  const kept = keptUnderRubric2(plan).amendments; // D27: amendments on record at a switch to rubric 3 are history
+  const post = plan.amendments.filter((a) => a.date >= start.date && /* ns-mutant:migrate-kept-freeze */a.n > kept);
+  const byId = new Map(plan.items.map((x) => [x.id, x])), base = new Map(plan.baseline.map((b) => [b.id, b]));
+  const opsOf = (a) => (a.ops.length === 1 && a.ops[0] === "—" ? [] : a.ops.map((t) => t.match(RE.op)).filter(Boolean));
+  // promise-preserving: no item added or removed, and every ~Dn leaves the statement and fails-when as baselined
+  for (const a of post) {
+    const ops = opsOf(a);
+    if (!(a.ops.length === 1 && a.ops[0] === "—") && ops.length !== a.ops.length) continue; // a malformed op is its own problem; its intent is unknown
+    const keeps = (op, id) => { const it = byId.get(id), b = base.get(id); return op === "~" && it && b && it.statement === b.statement && failsWhenOf(it) === failsWhenOf(b); };
+    if (/* ns-mutant:freeze-promise */ops.every(([, op, id]) => keeps(op, id))) problems.push(fmtN("freezePromise", { a: a.id }));
+  }
+  // the set: amendments after the latest unscoped READY review dated before the latest of them. A scoped review
+  // covers only the amendments it names, so it never starts a new set (a 30 % change it approved stays counted).
+  if (!post.length || !plan.baseline.length) return { problems, warnings };
+  const last = post.reduce((m, a) => (a.date > m ? a.date : m), "");
+  const anchor = approvals.filter((r) => !r.scope && r.date < last).at(-1);
+  const set = post.filter((a) => !anchor || a.date > anchor.date);
+  const touched = new Set(set.flatMap((a) => opsOf(a).map(([, , id]) => id)));
+  const pkgs = new Set(set.map((a) => a.package).filter(Boolean));
+  for (const w of plan.packages) if (w.leaf && w.items.some((d) => touched.has(d))) pkgs.add(w.id);
+  const k = touched.size, n = plan.baseline.length, pct = (k * 100) / n;
+  const full = /* ns-mutant:freeze-full */pct >= FREEZE_FULL_PCT;
+  if (!full && pct < FREEZE_SCOPED_PCT && pkgs.size < 2) return { problems, warnings };
+  const ids = set.map((a) => a.id).join(", "), first = set.reduce((m, a) => (a.date < m ? a.date : m), last);
+  const vals = { ids, k, n, p: Math.floor(pct), w: pkgs.size, date: last };
+  const out = review !== "pending" || status === "done" ? problems : warnings;
+  const after = approvals.filter((r) => r.date >= last);
+  if (full) {
+    const reviewed = after.some((r) => !r.scope);
+    const versioned = plan.versions.some((v) => v.date >= first);
+    if (!reviewed) out.push(out === warnings ? fmtN("freezeAwaiting", { ...vals, kind: "full" }) : fmtN("freezeFull", vals));
+    if (!versioned) out.push(fmtN("freezeVersion", { ...vals, date: first }));
+  } else if (/* ns-mutant:freeze-scoped */!after.some((r) => !r.scope) && !set.every((a) => approvals.some((r) => r.scope && r.date >= a.date && r.scope.includes(a.id)))) {
+    out.push(out === warnings ? fmtN("freezeAwaiting", { ...vals, kind: "scoped" }) : fmtN("freezeScoped", vals));
+  }
+  return { problems, warnings };
+}
+export const fmtN = (key, vals = {}) => MESSAGES_NS[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+// north-star D1: under rubric 3 a finding blocks only when it says what would fail — an outcome, a component, the
+// design bar or a completion limit. How to code it, or how to build a test rig, is advice however it is tagged.
+export const whatBlocks = (r, f) => r.tags.get(f) === "blocking" && RE.blocksTag.test(r.blocks.get(f) ?? "");
+// north-star D1: a rubric-3 REVISE whose open findings are all advisory stands as READY. No finding names what would
+// fail, every finding tagged blocking is dispositioned `advisory by rule`, the reviewer wrote a coverage line and a
+// components sweep, and every component the sweep names was rejected (an accepted one is a change to review).
+export function advisoryOnly(r) {
+  if (r.verdict !== "REVISE" || !r.coverage || r.missing === null) return false;
+  for (const f of r.findings) {
+    if (!r.dispositions.has(f) || whatBlocks(r, f)) return false;
+    if (r.tags.get(f) === "blocking" && !/advisory by rule/i.test(r.dispText.get(f) ?? "")) return false;
+  }
+  return r.missing.every((_, k) => r.mRejected.has(String(k + 1)));
+}
+// north-star D7, A8: a rubric-3 plan's depth. The owner's `profile:` beats the default; S plans default light,
+// M, L and Epic full, autonomous or not. Rubric 1 and 2 have no profile.
+export function profileOf(plan) {
+  if (rubricOf(plan) !== 3) return null;
+  const v = plan.fm.profile;
+  if (v === "light" || v === "full") return v;
+  if (v !== undefined) return "invalid";
+  // north-star A8: only an S plan is light by default, autonomous or not; M, L and Epic are full
+  return /* ns-mutant:profile-default */plan.fm.size === "S" ? "light" : "full";
+}
+// north-star D8: non-human rounds before the freeze — 2 light, 3 full; every other plan keeps the cap of 3
+export const roundCapOf = (plan) => (profileOf(plan) === "light" ? 2 : ROUND_CAP);
+// north-star D8: the review a `· frozen` approval stands on, and every condition it fails. It is the latest review,
+// a codex or subagent REVISE at or past the profile's round cap, by the reviewer `review:` names, with a coverage
+// line, and every finding that blocks is accepted as a risk by an `assumed` assumption citing it.
+export function frozenProblems(plan) {
+  const v = plan.fm.review, by = v.split(" · ")[0];
+  const r = plan.reviews.at(-1);
+  if (!r || r.reviewer === "human" || (r.verdict !== "REVISE" && !r.frozen)) return [fmtN("frozenNone", { v })];
+  const out = [];
+  const { run } = reviewRun(plan.reviews.filter((x) => x !== r || !r.frozen));
+  const runOf = r.frozen ? [...run, r] : run;
+  const k = runOf.filter((x) => x.reviewer !== "human").length;
+  const cap = roundCapOf(plan);
+  if (k < cap) out.push(fmtN("frozenRound", { v, n: r.n, r: k, profile: profileOf(plan), cap }));
+  if (r.reviewer !== by) out.push(fmtN("frozenReviewer", { v, n: r.n, by: r.reviewer }));
+  if (!r.coverage) out.push(fmtN("frozenCoverage", { v, n: r.n }));
+  const accepted = new Set(plan.assumptions.filter((a) => a.type === "assumed").map((a) => { const m = (a.text ?? "").match(RE.assumedRisk); return m ? `${m[1]}:${m[2]}` : ""; }));
+  // north-star A6: an outcome miss is never frozen; in an autonomous plan nobody accepted the risks, so the owner or
+  // the delegate does, by a Log note dated on or after the review
+  const dl = delegateOf(plan);
+  const acceptedBy = (f) => plan.notes.some((x) => { const m = x.text.match(ACCEPT_NOTE_RE); return m && x.date >= r.date && `${m[1]}:${m[2]}` === `${r.n}:${f}` && (sameName(m[3], "owner") || (dl && sameName(m[3], dl))); });
+  for (const f of r.findings) {
+    if (!whatBlocks(r, f)) continue;
+    if (/* ns-mutant:freeze-outcome */(r.blocks.get(f) ?? "").match(RE.blocksTag)[1].toLowerCase() === "outcome") { out.push(fmtN("frozenOutcome", { v, n: r.n, f })); continue; }
+    if (!accepted.has(`${r.n}:${f}`)) out.push(fmtN("frozenRisk", { v, n: r.n, f }));
+    else if (/* ns-mutant:freeze-accept */plan.autonomous && !acceptedBy(f)) out.push(fmtN("frozenUnaccepted", { v, n: r.n, f }));
+  }
+  return out;
+}
+
+// north-star D14: an item that waits on the owner is a manual item whose evidence says so — north-star's own D22
+// reads `manual: waiting on the owner or their delegate; …`. Rubric 3 only.
+export const WAITING_RE = /\bwaiting on the owner\b/i;
+export const isWaitingItem = (it) => it.type === "manual" && WAITING_RE.test(it.detail);
+// the close that leaves such items open: `- YYYY-MM-DD · status → done · close · partial`
+export const PARTIAL_CLOSE = "close · partial";
+export const isPartialClose = (plan) => rubricOf(plan) === 3 && plan.fm.status === "done" && plan.transitions.at(-1)?.status === "done" && plan.transitions.at(-1)?.detail === PARTIAL_CLOSE;
+// the current items with a pass that counts, by checkPlan's evidence rule: after the item's last fail in Log order,
+// and dated on/after its last +Dn or ~Dn amendment
+function passedIds(plan) {
+  const changedAt = new Map(), out = new Set();
+  for (const a of plan.amendments) if (!(a.ops.length === 1 && a.ops[0] === "—")) for (const tok of a.ops) { const m = tok.match(RE.op); if (m && m[1] !== "-") changedAt.set(m[2], a.date); }
+  for (const it of plan.items) {
+    const ev = plan.evidence.filter((e) => e.id === it.id);
+    const lastFail = ev.filter((e) => e.result === "fail").at(-1);
+    const since = changedAt.get(it.id) ?? "";
+    if (ev.some((e) => e.result === "pass" && e.type === it.type && (!lastFail || e.seq > lastFail.seq) && e.date >= since)) out.add(it.id);
+  }
+  return out;
+}
+// the items still waiting on the owner — a later pass takes an item off the list, so the rate is recomputed from the Log
+export function waitingOf(plan) {
+  if (rubricOf(plan) !== 3) return [];
+  const passed = passedIds(plan);
+  return plan.items.filter((it) => isWaitingItem(it) && !passed.has(it.id)).map((it) => it.id);
+}
+
+// north-star D13: the owner names or replaces the delegate by a Log note, `none` withdraws it; the delegate answers a
+// question by a note naming itself; an owner-only step (a payment, a credential, an irreversible step, or one tagged
+// `owner-only`) waits for the owner. Rubric 3 only.
+export const DELEGATE_NOTE_RE = /^owner · delegate · ([^·]+?)\s*$/;
+// north-star A6: `- YYYY-MM-DD · note · accept · Review <n> F<f> · <who>` — the owner or the delegate accepts a frozen risk
+export const ACCEPT_NOTE_RE = /^accept · Review (\d+) F(\d+) · ([^·]+?)\s*$/;
+export const DELEGATE_ANSWER_RE = /^delegate · ([^·]*?)\s*(?:·|$)/;
+export const OWNER_ONLY_RE = /\bowner-only\b|\birreversible\b|\bpayments?\b|\bcredentials?\b/i;
+// an answer signed with the role instead of a name
+const DELEGATE_WORD_RE = /^(?:the )?(?:owner'?s )?delegate$/i;
+const sameName = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+const delegateOf = (plan) => { const d = String(plan.fm.delegate ?? "").trim(); return d && d.toLowerCase() !== "none" ? d : null; };
+// the builder: `builder:` in the frontmatter (comma-separated), else whoever recorded a passing test, cmd, file or
+// host-check — the identity that ran the checks — except the delegate
+const CHECK_TYPES = ["test", "cmd", "file", "host-check"];
+export function buildersOf(plan) {
+  const named = String(plan.fm.builder ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (named.length) return new Set(named);
+  const dl = delegateOf(plan);
+  return new Set(plan.evidence.filter((e) => e.result === "pass" && CHECK_TYPES.includes(e.type) && !(dl && sameName(e.who, dl))).map((e) => e.who.trim().toLowerCase()));
+}
+export function delegateProblems(plan) {
+  if (rubricOf(plan) !== 3) return [];
+  const out = [];
+  const dl = delegateOf(plan);
+  const named = plan.notes.map((x) => ({ x, m: x.text.match(DELEGATE_NOTE_RE) })).filter((y) => y.m).at(-1);
+  const last = named ? named.m[1].trim() : null;
+  if (dl) { if (/* ns-mutant:delegate-logged */!named || !sameName(last, dl)) out.push(fmtN("delegateUnlogged", { who: dl, last: last ?? "none logged" })); }
+  else if (named && last.toLowerCase() !== "none") out.push(fmtN("delegateNotSet", { who: last, date: named.x.date }));
+  const d = dl ?? "not named";
+  for (const n of plan.notes) {
+    const m = n.text.match(DELEGATE_ANSWER_RE);
+    if (m && /* ns-mutant:delegate-author-note */!(dl && sameName(m[1], dl))) out.push(fmtN("delegateAuthor", { where: `Log note on ${n.date}`, d, got: cleanLine(m[1]).slice(0, 40) }));
+  }
+  const byId = new Map(plan.items.map((x) => [x.id, x]));
+  const builders = buildersOf(plan);
+  for (const e of plan.evidence) {
+    const it = byId.get(e.id);
+    if (/* ns-mutant:delegate-author-who */DELEGATE_WORD_RE.test(e.who)) { out.push(fmtN("delegateAuthor", { where: `${e.id} evidence on ${e.date}`, d, got: e.who })); continue; }
+    if (e.result !== "pass" || !it) continue;
+    if (/* ns-mutant:owner-only */dl && sameName(e.who, dl) && OWNER_ONLY_RE.test(`${it.statement} ${it.detail}`)) out.push(fmtN("delegateOwnerOnly", { d: e.id, date: e.date, who: e.who }));
+    if (it.type === "manual" && builders.has(e.who.trim().toLowerCase())) out.push(fmtN("builderAccepts", { d: e.id, date: e.date, who: e.who }));
+  }
+  for (const r of plan.reviews) {
+    const who = [r.reviewer, r.by].find((x) => x && builders.has(x.toLowerCase()));
+    if (/* ns-mutant:builder-review */who) out.push(fmtN("builderReviews", { n: r.n, who }));
+  }
+  return out;
+}
 
 // calib:begin — calibration (dod-v0-2 child): dry-run evidence before approval. Every text it prints is a value of
 // MESSAGES_CALIBRATION, emitted only through fmtC inside this region; every rule condition carries a
@@ -537,14 +844,14 @@ function probeMap(plan) {
     for (const part of body.split(";").map((x) => x.trim()).filter(Boolean)) {
       const pm = part.match(/^(\d+\.\d+)\s+(.+)$/);
       if (!pm) continue;
-      const prose = /^prose:/.test(pm[2]);
+      const prose = /^(prose|not in brief):/.test(pm[2]);
       out.set(pm[1], { prose, items: prose ? [] : [...pm[2].matchAll(/\bD\d+\b/g)].map((x) => x[0]) });
     }
   }
   return out;
 }
 // D3: the probe ids an amendment's `layer:` names — `layer: 7` is a layer, not a probe, and never counts
-const layerProbes = (layer) => String(layer).split(/[\s,]+/).filter((x) => /^\d{1,2}\.\d{1,2}$/.test(x) && probeIds(2, Number(x.split(".")[0])).includes(x));
+const layerProbes = (layer) => String(layer).split(/[\s,]+/).filter((x) => /^\d{1,2}\.\d{1,2}$/.test(x) && probeIds(3, Number(x.split(".")[0])).includes(x));
 // D3, D26: the rows of `## Project probes` in profile.md, `- <n>.<m> · <text>`; an indented line continues a row
 export function parseProjectProbes(text) {
   const probes = [], malformed = [];
@@ -553,7 +860,7 @@ export function parseProjectProbes(text) {
     if (l.startsWith("## ")) { inSection = /^## Project probes\s*$/.test(l); continue; }
     if (!inSection || !l.startsWith("- ")) continue;
     const m = l.match(/^- (\d{1,2}\.\d{1,2}) · \S/);
-    const ok = Boolean(m) && probeIds(2, Number(m[1].split(".")[0])).includes(m[1]);
+    const ok = Boolean(m) && probeIds(3, Number(m[1].split(".")[0])).includes(m[1]);
     if (/* calib-mutant:profile-row */(!ok)/* calib-end */) malformed.push(l); else if (m) probes.push(m[1]);
   }
   return { probes, malformed };
@@ -705,7 +1012,7 @@ export function capBreaches(plan) {
   let round = 0;
   for (const r of plan.reviews) {
     round++;
-    if (round > ROUND_CAP && r.reviewer !== "human" && !capCovered(plan, r.n)) out.push({ r, round });
+    if (round > roundCapOf(plan) && r.reviewer !== "human" && !capCovered(plan, r.n)) out.push({ r, round });
     if (r.verdict === "READY") round = 0;
   }
   return out;
@@ -801,6 +1108,11 @@ export function loadPlans(dir, { read = (p) => readFileSync(p), onReviewsFault =
     try {
       const d = existsSync(rf) ? decodeReviews(read(rf), `${p.slug}.reviews.md`) : { text: "" };
       p.reviews = parseReviews(d.text);
+      // north-star D1: what the round cap, the run and approval read as the verdict — the reviewer's REVISE stays
+      // in the file, and `advisoryOnly` marks the review that stood as READY by the rule
+      if (rubricOf(p) === 3) for (const r of p.reviews) if (advisoryOnly(r)) { r.verdict = "READY"; r.advisoryOnly = true; }
+      // north-star D8: the freeze — the latest review stands as READY when every condition of the `· frozen` approval holds
+      if (rubricOf(p) === 3 && /^(codex|subagent) · frozen$/.test(p.fm.review ?? "") && !frozenProblems(p).length) { const r = p.reviews.at(-1); r.verdict = "READY"; r.frozen = true; }
       p.reviewsEncoding = { problem: d.problem ?? null, warning: d.warning ?? null };
     } catch (e) { if (!onReviewsFault) throw e; p.reviews = []; onReviewsFault(p, e); }
   }
@@ -862,7 +1174,7 @@ export function packageCheck(plan) {
   if (!plan.hasWbs) {
     if (["L", "Epic"].includes(plan.fm.size)) {
       const msg = fmtW("required", { size: plan.fm.size });
-      if (rubricOf(plan) === 2) problems.push(msg); else warnings.push(msg);
+      if (rubricOf(plan) >= 2) problems.push(msg); else warnings.push(msg);
     }
     // null, not [] — no section means no growth line at all, which is not the same as a section that grew nothing
     return { problems, warnings, grew: null };
@@ -976,7 +1288,7 @@ export function checkPlan(plan, all = [plan]) {
   if (fm.coverage_reviewer && fm.coverage_reviewer !== "pending" && !RE.coverageLine.test(fm.coverage_reviewer)) problems.push(`coverage_reviewer "${fm.coverage_reviewer}" is not "a/b layers · c/d probes"`);
   const review = fm.review ?? "pending";
   // plan-accuracy D7: a plan may be approved on a converged review — three rounds, every finding applied, none gating
-  const reviewM = review === "pending" ? null : review.match(/^(codex|subagent|human)(?: · (converged))?$/);
+  const reviewM = review === "pending" ? null : review.match(/^(codex|subagent|human)(?: · (converged|frozen))?$/);
   if (review !== "pending" && !reviewM) problems.push(`review "${review}" must be pending, ${REVIEWERS.join(", ")}`);
 
   const ids = plan.items.map((x) => x.id);
@@ -1005,6 +1317,14 @@ export function checkPlan(plan, all = [plan]) {
   if (rubric === 1 && status === "draft") warnings.push(fmtA("rubricOneDraft"));
   const counts = probeCounts(rubric);
   const gating = gatingOf(rubric);
+  // north-star D7: the profile and, for a light plan, the risk the owner accepts
+  const profile = profileOf(plan);
+  if (profile === "invalid") problems.push(fmtN("profileValue", { v: fm.profile }));
+  if (profile === "light" && String(fm.risk ?? "").trim().length < 12) problems.push(fmtN("riskMissing"));
+  // north-star D27: the placeholder `--migrate --to 3` writes is owed until the author states the risk
+  else if (rubric === 3 && /* ns-mutant:risk-todo *//^TODO\b/.test(String(fm.risk ?? "").trim())) problems.push(fmtN("riskTodo"));
+  const kept = keptUnderRubric2(plan);
+  if (rubric !== 3) for (const a of plan.assumptions) if (a.type === "assumed") problems.push(fmtN("assumedRubric", { id: a.id }));
 
   // 1. coverage table: canonical rows, probe totals, pointers resolve, D-item mapping for 2–14; gate
   if (plan.coverage.length) {
@@ -1019,7 +1339,7 @@ export function checkPlan(plan, all = [plan]) {
       const m = r.probes.match(/^(\d+)\/(\d+)$/);
       if (!m) problems.push(`layer ${r.n} probes "${r.probes}" is not n/n`);
       else {
-        if (Number(m[2]) !== canonProbes) problems.push(`layer ${r.n} claims ${m[2]} probes; the rubric has ${canonProbes}${rubric === 2 ? ` (${probeIds(rubric, r.n).join(", ")})` : ""} — denominators are fixed; a probe you examined and found inapplicable is still answered (state the test in the section)`);
+        if (Number(m[2]) !== canonProbes) problems.push(`layer ${r.n} claims ${m[2]} probes; the rubric has ${canonProbes}${rubric >= 2 ? ` (${probeIds(rubric, r.n).join(", ")})` : ""} — denominators are fixed; a probe you examined and found inapplicable is still answered (state the test in the section)`);
         if (Number(m[1]) > Number(m[2])) problems.push(`layer ${r.n} probes ${r.probes}: numerator exceeds denominator`);
         if (r.status === "Considered" && m[1] !== m[2]) problems.push(`layer ${r.n} is Considered with ${r.probes} probes — Considered means every applicable probe`);
         if (r.status === "Gap" && m[1] === m[2]) problems.push(`layer ${r.n} is Gap with all probes answered — mark it Considered or fix the count`);
@@ -1028,7 +1348,7 @@ export function checkPlan(plan, all = [plan]) {
         const head = r.pointer.split("›")[0].trim().toLowerCase();
         if (!head) problems.push(`layer ${r.n} is Considered without a pointer`);
         else if (!plan.headings.some((h) => h.toLowerCase() === head || h.toLowerCase().startsWith(head))) problems.push(`layer ${r.n} pointer "${r.pointer.split("›")[0].trim()}" does not name a heading in this plan`);
-        if (r.n >= 2 && r.n <= 14 && rubric === 2) {
+        if (r.n >= 2 && r.n <= 14 && rubric >= 2) {
           // pointer: <heading> [› <sub-heading>] › <probe> <Dn…>; <probe> prose: <reason>; …
           const segs = r.pointer.split("›");
           const body = segs.length > 1 ? segs[segs.length - 1] : "";
@@ -1038,6 +1358,16 @@ export function checkPlan(plan, all = [plan]) {
             if (!pm) continue;
             const [, probe, rest] = pm;
             if (!probeIds(rubric, r.n).includes(probe)) { problems.push(fmtA("probeForeign", { n: r.n, p: probe })); continue; }
+            // north-star D7: a light plan answers a probe its brief does not touch — but not a gating or layer-10 one (A5)
+            const nib = rubric === 3 ? rest.match(/^not in brief:\s*(.*)$/) : null;
+            if (nib) {
+              seen.set(probe, true);
+              if (profile !== "light") problems.push(fmtN("notInBriefFull", { n: r.n, p: probe }));
+              // north-star A5: a gating probe or a layer-10 probe is never `not in brief`
+              else if (/* ns-mutant:nib-gating */gating.includes(probe) || probe.startsWith("10.")) problems.push(fmtN("notInBriefGating", { n: r.n, p: probe }));
+              else if (nib[1].trim().length < 12) problems.push(fmtN("notInBriefShort", { n: r.n, p: probe }));
+              continue;
+            }
             const prose = rest.match(/^prose:\s*(.*)$/);
             if (prose) {
               // a prose mapping the rubric refuses is still an attempt: it is reported once, with the reason,
@@ -1089,12 +1419,15 @@ export function checkPlan(plan, all = [plan]) {
       else { if (!expected.has(id)) problems.push(`${a.id}: ~${id} but ${id} does not exist at that point`); changedAt.set(id, a.date); designOps++; }
     }
     if (a.kind === "discovered") { discoveredOps += Math.max(1, designOps); if (!/^\d{1,2}(\.\d)?$/.test(a.layer)) problems.push(`${a.id}: discovered amendments must name the layer or probe (e.g. 7 or 7.2), got "${a.layer}"`); }
+    // north-star D15: under rubric 3 a discovered amendment names the outcome, component, design bar or limit it
+    // changes; a change of method alone is a Log note (`note · method · …`), which the rate never reads
+    if (rubric === 3 && a.n > kept.amendments && a.kind === "discovered" && /* ns-mutant:changes-tag */!RE.changesTag.test(a.why)) problems.push(fmtN("changesMissing", { a: a.id }));
     // plan-accuracy D20: a planning decision reversed counts exactly like discovered; a build finding nobody
     // could have foreseen is excluded, but must say what was found
     if (a.kind === "corrected") { discoveredOps += Math.max(1, designOps); if (!/^\d{1,2}(\.\d)?$/.test(a.layer)) problems.push(fmtA("correctedLayer", { An: a.id, layer: a.layer })); }
     if (a.kind === "emergent" && !/finding:\s*\S[\s\S]{11,}/.test(a.why)) problems.push(fmtA("emergentFinding", { An: a.id }));
     // D23: a scope change the user asked for should show up as a plan version
-    if (rubric === 2 && a.kind === "requested" && !plan.versions.some((v) => v.date >= a.date)) warnings.push(fmtA("unversionedRequest", { An: a.id, date: a.date }));
+    if (rubric >= 2 && a.kind === "requested" && !plan.versions.some((v) => v.date >= a.date)) warnings.push(fmtA("unversionedRequest", { An: a.id, date: a.date }));
     if (gating.includes(a.layer) || removal) reviewTriggers.push({ a, removal });
   }
   // plan-accuracy D6: an item named by ACCRETION or more amendments, counting each amendment once
@@ -1105,15 +1438,23 @@ export function checkPlan(plan, all = [plan]) {
 
   // plan-accuracy D4: under rubric 2 a test or cmd item says what makes it fail. `## Baseline` is history, so it
   // is never checked; `file` and `manual` items have no failing input to name.
-  if (rubric === 2) for (const it of plan.items) {
+  if (rubric >= 2) for (const it of plan.items) {
     if (it.type !== "test" && it.type !== "cmd") continue;
     const m = it.detail.match(/fails when:([\s\S]*)$/);
     if (!m || m[1].replace(/\s/g, "").length < 3) problems.push(fmtA("failsWhen", { n: it.id.slice(1) }));
   }
+  // north-star D11: `host-check: <name> · <command>` — rubric 3 only; the host check defines its own failure, so it
+  // needs no `fails when:`. `## Baseline` is history and is not checked.
+  for (const it of plan.items) {
+    if (it.type !== "host-check") continue;
+    if (rubric !== 3) { problems.push(fmtN("hostCheckRubric", { d: it.id })); continue; }
+    const k = it.detail.indexOf(" · ");
+    if (/* ns-mutant:host-check-form */k < 1 || !it.detail.slice(0, k).trim() || !it.detail.slice(k + 3).trim()) problems.push(fmtN("hostCheckForm", { d: it.id }));
+  }
 
   // plan-accuracy D5: prose that claims a control — "uploads are validated" — with no D-item behind it is a
   // warning, never a problem: the reviewer decides whether the claim is carried by an item.
-  if (rubric === 2) {
+  if (rubric >= 2) {
     let over = 0;
     const hits = [];
     for (const name of PROSE_SECTIONS) {
@@ -1179,6 +1520,43 @@ export function checkPlan(plan, all = [plan]) {
     const undisposed = [...r.findings].filter((f) => !r.dispositions.has(f));
     if (undisposed.length) problems.push(`Review ${r.n}: findings without a disposition: F${undisposed.join(", F")}`);
     if (r.verdict === "READY" && !r.coverage) problems.push(`Review ${r.n} is READY but has no reviewer coverage line`);
+    // north-star D1, D4: what blocks, and the components sweep, under rubric 3 only — and, on a plan switched by
+    // `--migrate --to 3`, only for the reviews recorded after the switch (D27)
+    if (rubric === 3 && /* ns-mutant:migrate-kept-review */r.n > kept.reviews) {
+      for (const f of r.findings) if (r.tags.get(f) === "blocking" && !whatBlocks(r, f) && !/advisory by rule/i.test(r.dispText.get(f) ?? "")) problems.push(fmtN("blocksMissing", { n: r.n, f }));
+      if (r.missing === null) problems.push(fmtN("missingLine", { n: r.n }));
+      else r.missing.forEach((name, k) => { if (!r.mDispositions.has(String(k + 1))) problems.push(fmtN("missingUndisposed", { n: r.n, m: k + 1, name: cleanLine(name).slice(0, 60) })); });
+    }
+  }
+  // north-star D5: the design bar is answered by a check, or by a named judge for a qualitative bar
+  if (rubric === 3) {
+    const bar = probeMap(plan).get("11.5");
+    const answers = (d) => { const it = byId.get(d); return Boolean(it) && (it.type === "test" || it.type === "cmd" || (it.type === "manual" && /\bjudge:\s*\S/i.test(it.detail))); };
+    if (bar && !bar.prose && bar.items.length && !bar.items.some(answers)) problems.push(fmtN("designBarItem", { d: bar.items.join(", ") }));
+  }
+  // north-star D8: an advisory finding of a READY review is a deferred Log note, never an amendment
+  if (rubric === 3) for (const a of plan.amendments.filter((x) => x.n > kept.amendments)) for (const m of a.why.matchAll(/\bReview (\d+) F(\d+)\b/g)) {
+    const r = plan.reviews.find((x) => x.n === Number(m[1]));
+    if (r && r.verdict === "READY" && r.findings.has(m[2]) && !whatBlocks(r, m[2])) problems.push(fmtN("advisoryAmendment", { a: a.id, n: m[1], f: m[2] }));
+  }
+  // north-star D3: every component served by an item, every item serving a component, every step advancing one
+  if (rubric === 3) {
+    if (!plan.hasComponents) problems.push(fmtN("componentsMissing"));
+    for (const l of plan.componentBad) problems.push(fmtN("componentLine", { text: cleanLine(l).slice(0, 60) }));
+    const seenC = new Set(), served = new Set();
+    for (const c of plan.components) {
+      if (seenC.has(c.id)) problems.push(fmtN("componentDuplicate", { c: c.id }));
+      seenC.add(c.id);
+      if (!c.items.length) problems.push(fmtN("componentEmpty", { c: c.id }));
+      if (/* ns-mutant:component-todo *//^TODO\b/.test(c.title)) problems.push(fmtN("componentTodo", { c: c.id }));
+      for (const d of c.items) { if (byId.has(d)) served.add(d); else problems.push(fmtN("componentUnknownItem", { c: c.id, d })); }
+    }
+    if (plan.hasComponents) for (const it of plan.items) if (!served.has(it.id)) problems.push(fmtN("itemOrphan", { d: it.id }));
+    for (const [k, l] of plan.stepLines) {
+      const m = l.match(RE.advances);
+      if (!m) { problems.push(fmtN("stepNoComponent", { k })); continue; }
+      for (const c of m[1].split(/[ ,]+/)) if (!seenC.has(c)) problems.push(fmtN("stepUnknownComponent", { k, c }));
+    }
   }
   plan.reviews.forEach((r, k) => {
     if (r.n !== k + 1) problems.push(`Review ${r.n}: reviews must be numbered sequentially (expected Review ${k + 1})`);
@@ -1193,6 +1571,12 @@ export function checkPlan(plan, all = [plan]) {
   // when a converged review is on offer, its conditions are the verdict: the author is told which one failed,
   // not that the file has no READY line
   const convAttempted = reviewM?.[2] === "converged" && lastReview && lastReview.verdict !== "READY";
+  // north-star D8: a `· frozen` approval that does not hold names each condition it fails, instead of "no READY"
+  let frozenFailed = false;
+  if (reviewM?.[2] === "frozen") {
+    if (rubric !== 3) { problems.push(fmtN("frozenRubric", { v: review })); frozenFailed = true; }
+    else if (!lastReview?.frozen && lastReview?.verdict !== "READY") { const fp = frozenProblems(plan); problems.push(...fp); frozenFailed = fp.length > 0; }
+  }
   if (convAttempted) {
     const v = review, n = lastReview.n, k = lastReview.findings.size;
     const before = problems.length;
@@ -1215,8 +1599,8 @@ export function checkPlan(plan, all = [plan]) {
   const approvals = converged ? [...readyReviews, converged] : readyReviews;
   if ((status === "ready" || status === "done") && review === "pending") problems.push(`status ${status} but review is pending`);
   if (past && review !== "pending") {
-    if (!approvals.length && !convAttempted) problems.push(`review is ${review} but ${plan.slug}.reviews.md has no VERDICT: READY`);
-    else if (!converged && !convAttempted && lastReady) {
+    if (!approvals.length && !convAttempted && !frozenFailed) problems.push(`review is ${review} but ${plan.slug}.reviews.md has no VERDICT: READY`);
+    else if (!converged && !convAttempted && !frozenFailed && lastReady) {
       // the review on record is the LATEST one — a later REVISE cancels an earlier READY
       if (lastReview.verdict !== "READY") problems.push(`review is ${review} but the latest review (Review ${lastReview.n}) is ${lastReview.verdict ?? "without a verdict"} — set review: pending until a later READY`);
       if (lastReady.reviewer !== (reviewM?.[1] ?? review)) problems.push(`review: ${review} but the latest READY review (Review ${lastReady.n}) was by ${lastReady.reviewer}`);
@@ -1237,6 +1621,13 @@ export function checkPlan(plan, all = [plan]) {
     if (status === "done") problems.push(`${a.id} (${gating.includes(a.layer) ? `gating probe ${a.layer}` : "removes a baseline item"}) has no READY review dated on/after it`);
     else if (review !== "pending") problems.push(`${a.id} (${gating.includes(a.layer) ? `gating probe ${a.layer}` : "removes a baseline item"}) requires review: pending until re-approved`);
   }
+  // north-star D9: the build freeze — promise-preserving amendments belong in the Log; a large set is re-reviewed
+  if (rubric === 3) { const fz = freezeProblems(plan, { approvals, review, status }); problems.push(...fz.problems); warnings.push(...fz.warnings); }
+  // north-star D12: the planning budget, from the latest budget note in the Log — a warning, never a problem
+  warnings.push(...budgetWarnings(plan));
+  // north-star D13: the delegate named by the owner, answers signed by who gave them, owner-only steps kept for the
+  // owner, and the builder never its own reviewer or acceptor
+  problems.push(...delegateProblems(plan));
   // review-loop D10: a scope names amendments of this plan; a blocking finding quoting only probes outside it is flagged
   const amendIds = new Set(plan.amendments.map((a) => a.id));
   for (const r of plan.reviews) {
@@ -1257,10 +1648,25 @@ export function checkPlan(plan, all = [plan]) {
   if (signal) info.push(signal);
 
   // 5. done: everything verified, report present; epics: ≥1 child, all done
+  // north-star D14: a rubric-3 `close · partial` leaves open only the items that wait on the owner; the rate leaves
+  // them out (reportNumbers) until a later pass
+  const partial = isPartialClose(plan);
+  const waitingNow = rubric === 3 ? plan.items.filter((it) => isWaitingItem(it) && !verified.has(it.id)).map((it) => it.id) : [];
   if (status === "done") {
-    const open = plan.items.filter((it) => !it.checked || !verified.has(it.id)).map((it) => it.id);
+    const open = plan.items.filter((it) => (!it.checked || !verified.has(it.id)) && !(/* ns-mutant:partial-close */partial && waitingNow.includes(it.id))).map((it) => it.id);
     if (open.length) problems.push(`status done but unverified items: ${open.join(", ")}`);
     if (!(plan.sections["Report"] ?? []).some((l) => l.trim())) problems.push("status done but ## Report is empty");
+    if (partial) {
+      const report = (plan.sections["Report"] ?? []).join("\n");
+      for (const d of waitingNow) if (/* ns-mutant:partial-report */!new RegExp(`\\b${d}\\b`).test(report)) problems.push(fmtN("partialReport", { d }));
+      const baseIds = new Set(plan.baseline.map((b) => b.id));
+      if (/* ns-mutant:partial-list */waitingNow.length) info.push(fmtN("partialWaiting", { k: waitingNow.length, ids: waitingNow.join(", "), b: plan.baseline.length - waitingNow.filter((d) => baseIds.has(d)).length, n: plan.baseline.length }));
+      else info.push(fmtN("partialComplete", { date: plan.transitions.at(-1).date }));
+    }
+  }
+  if (rubric === 3 && status === "in-progress") {
+    const un = plan.items.filter((it) => !it.checked || !verified.has(it.id));
+    if (un.length && un.every((it) => waitingNow.includes(it.id))) info.push(fmtN("partialReady", { ids: un.map((it) => it.id).join(", ") }));
   }
   // hierarchy: any plan may have children and any plan may be a parent (v0.2); the tree must exist, be reciprocal and acyclic
   if (fm.size === "Epic" && !plan.children.length) problems.push("Epic with no children under ## Children");
@@ -1310,7 +1716,7 @@ export function checkPlan(plan, all = [plan]) {
       const m = t.detail.match(CMD.superseded);
       if (!m) problems.push("superseded transition must read `status → superseded · supersede · by <slug>`");
       else if (!all.find((p) => p.slug === m[1])) problems.push(`superseded by ${m[1]}, which is not in the store`);
-    } else if (CMD[t.status] && !CMD[t.status].test(t.detail)) problems.push(`transition to ${t.status} must read \`status → ${t.status} · ${t.status === "draft" ? "plan" : t.status === "ready" ? "approve" : "close"}\``);
+    } else if (CMD[t.status] && !CMD[t.status].test(t.detail) && !(rubric === 3 && t.status === "done" && t.detail === PARTIAL_CLOSE)) problems.push(`transition to ${t.status} must read \`status → ${t.status} · ${t.status === "draft" ? "plan" : t.status === "ready" ? "approve" : "close"}\``);
     prev = t.status;
   }
   const reachedReady = plan.transitions.some((t) => t.status === "ready");
@@ -1357,13 +1763,19 @@ export function reportNumbers(plan, discoveredOps, grew = null) {
   }
   // discovered counts design changes (+/~ ops on D-items), so bundling several into one amendment does not lower it
   const G = discoveredOps ?? plan.amendments.filter(counted).reduce((n, a) => n + Math.max(1, a.ops.filter((o) => /^[+~]/.test(o)).length), 0);
-  const rate = B ? Math.round((B / (B + G)) * 100) : null;
+  // north-star D14: a done · partial plan is scored over its verified items — a baseline item still waiting on the
+  // owner is left out of both sides until its pass, which every reader recomputes from the Log. Every other plan: S = B.
+  const partial = isPartialClose(plan);
+  const waiting = partial ? waitingOf(plan) : [];
+  const baseIds = new Set(plan.baseline.map((b) => b.id));
+  const S = B - /* ns-mutant:partial-rate */waiting.filter((d) => baseIds.has(d)).length;
+  const rate = S ? Math.round((S / (S + G)) * 100) : null;
   // field-fixes D2: before the build there is nothing to score — a draft or ready plan's 100 % is an empty
   // amendment list, not a prediction; the renderers print `n/a` for it
   const notStarted = ["draft", "ready"].includes(plan.fm?.status); /* ffx-mutant:rate-na */
   // `grew` is the per-package growth of D17 when the caller has run the package checks; a plan with no
   // `## Work breakdown` section has no growth line at all, which is why null and [] are different answers
-  return { baseline: B, discoveredDesign: G, wrong, missedOps, ...kinds, rate, notStarted, missed, grew: grew ?? (plan.hasWbs ? packageCheck(plan).grew : null), ...reworkCount(plan) };
+  return { baseline: B, scored: S, partial, waiting, discoveredDesign: G, wrong, missedOps, ...kinds, rate, notStarted, missed, grew: grew ?? (plan.hasWbs ? packageCheck(plan).grew : null), ...reworkCount(plan) };
 }
 
 // ---------------------------------------------------------------- atomic writes
@@ -1417,7 +1829,7 @@ const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() 
 const MIGRATED_RE = /^- \d{4}-\d{2}-\d{2} · note · migrated to dod 2/;
 
 // Parse the --migrate command line from the arguments alone (refusal 0): exactly one slug, at most one --dry-run,
-// at most one --to 1|2, at most one --dir <store>. Returns null on any malformed form.
+// at most one --to 1|2|3, at most one --dir <store>. Returns null on any malformed form.
 export function parseMigrateArgs(args) {
   const out = { slug: null, to: 2, dryRun: false, dir: undefined };
   let seenTo = false, seenMigrate = false;
@@ -1425,7 +1837,7 @@ export function parseMigrateArgs(args) {
     const a = args[k];
     if (a === "--migrate") { if (seenMigrate) return null; seenMigrate = true; }
     else if (a === "--dry-run") { if (out.dryRun) return null; out.dryRun = true; }
-    else if (a === "--to") { const v = args[++k]; if (seenTo || !["1", "2"].includes(v)) return null; seenTo = true; out.to = Number(v); }
+    else if (a === "--to") { const v = args[++k]; if (seenTo || !["1", "2", "3"].includes(v)) return null; seenTo = true; out.to = Number(v); }
     else if (a === "--dir") { const v = args[++k]; if (out.dir !== undefined || v === undefined || v.startsWith("--")) return null; out.dir = v; }
     else if (a.startsWith("--") || out.slug !== null) return null;
     else out.slug = a;
@@ -1481,6 +1893,44 @@ export function migrateText(text, { to = 2, date = localDate() } = {}) {
   return { text: out, lines: shown, renamed };
 }
 
+// north-star D27: the pure text change of `--migrate --to 3`. `rubric: 3`; `profile:` (light for S, full
+// otherwise, A8) and the `risk:` placeholder after it unless the plan has them; a `## Components` skeleton — one
+// component holding every current item, its title starting TODO — after `## Definition of Done` unless the plan has
+// the section; the switch note after the Log's last non-empty line. No other line is touched: the Baseline, the
+// items, the evidence, the amendments and the reviews file stay byte-identical. Line endings are kept as they are.
+export function migrateRubricText(text, plan, { date = localDate() } = {}) {
+  const eol = text.includes("\r\n") ? "\r" : "";
+  const src = text.split("\n");
+  const addProfile = plan.fm.profile === undefined, addRisk = plan.fm.risk === undefined, addParts = !plan.hasComponents;
+  const profile = /* ns-mutant:migrate-profile */plan.fm.size === "S" ? "light" : "full";
+  const what = [addParts && "a ## Components skeleton (C1, to split)", addProfile && `profile: ${profile}`, addRisk && "a risk: line to fill in"].filter(Boolean);
+  const note = `- ${date} · note · ${fmtN("migrateNote", { r: plan.reviews.length, a: plan.amendments.length, what: what.join(", ") || "nothing else — it already had components, a profile and a risk line" })}`;
+  const ids = plan.items.map((x) => x.id).join(" ");
+  const skeleton = ["## Components", `- C1 · **${SKELETON_TITLE}** ${SKELETON_STATEMENT}${ids ? ` · ${ids}` : ""}`, ""];
+  // positions: the frontmatter rubric line, the heading after ## Definition of Done (or ## Log), the Log's end
+  let fm = 0, section = "", rubricAt = -1, partsAt = -1, logHead = -1, logEnd = -1;
+  src.forEach((raw, k) => {
+    const l = raw.replace(/\r$/, "");
+    if (fm < 2 && l === "---") { fm++; return; }
+    if (fm === 1) { if (rubricAt < 0 && /^rubric:\s*/.test(l)) rubricAt = k; return; }
+    const h = l.match(/^## (.+)$/);
+    if (h) { if (section === "Definition of Done" && partsAt < 0) partsAt = k; section = h[1].trim(); if (section === "Log" && logHead < 0) logHead = k; return; }
+    if (section === "Log" && l.trim()) logEnd = k;
+  });
+  if (partsAt < 0) partsAt = logHead >= 0 ? logHead : src.length;
+  const noteAt = logEnd >= 0 ? logEnd : logHead >= 0 ? logHead : src.length - 1;
+  const out = [], shown = [];
+  const put = (l) => { out.push(`${l}${eol}`); shown.push(l); };
+  src.forEach((raw, k) => {
+    if (addParts && k === partsAt) skeleton.forEach((l) => (l ? put(l) : out.push(eol)));
+    if (k === rubricAt) { put("rubric: 3"); if (addProfile) put(`profile: ${profile}`); if (addRisk) put(`risk: ${RISK_TODO}`); }
+    else out.push(raw);
+    if (k === noteAt) put(note);
+  });
+  if (addParts && partsAt >= src.length) skeleton.forEach((l) => (l ? put(l) : out.push(eol)));
+  return { text: out.join("\n"), lines: shown, what };
+}
+
 // Returns the exit code; prints change lines to stdout and a refusal (exactly one line) to stderr.
 export function migratePlan(dir, slug, { to = 2, dryRun = false, nodeVersion = process.versions.node } = {}) {
   // one printed line per change (never wrapped: the change lines are the contract), sanitised like all plan text;
@@ -1488,6 +1938,7 @@ export function migratePlan(dir, slug, { to = 2, dryRun = false, nodeVersion = p
   const say = (l) => console.log(plainText(l));
   const shown = (x) => relative(process.cwd(), x).split(sep).join("/") || ".";
   const refuse = (key, vals) => { const v = { ...vals }; for (const k of ["path", "dir"]) if (v[k]) v[k] = shown(v[k]); console.error(plainText(fmtR(key, v))); return 1; };
+  const refuseN = (key, vals) => { console.error(plainText(fmtN(key, vals))); return 1; };
   // (1) node-old — decided before any file or directory is read
   const old = nodeRefusalVersion(nodeVersion);
   if (old) return refuse("nodeOld", { version: old });
@@ -1512,6 +1963,30 @@ export function migratePlan(dir, slug, { to = 2, dryRun = false, nodeVersion = p
     const plans = loadPlans(dir);
     const parsed = parsePlan(text, file);
     parsed.reviews = plans.find((p) => p.slug === slug)?.reviews ?? [];
+    if (to === 3) {
+      // north-star D27: (5) already rubric 3, (6) a closed plan — its score is final, (7) rubric 1, (8) check problems
+      const rub = rubricOf(parsed);
+      if (rub === 3) return refuseN("migrateRubric3", { slug });
+      if (/* ns-mutant:migrate-final */FINAL_STATUSES.includes(parsed.fm.status)) return refuseN("migrateFinal", { slug, status: parsed.fm.status, n: rub });
+      if (rub !== 2) return refuseN("migrateRubric1", { slug });
+      if (checkPlan(parsed, plans.map((p) => (p.slug === slug ? parsed : p))).problems.length) return refuse("checkProblems", { slug });
+      const r = migrateRubricText(text, parsed);
+      // what the switch leaves the author to do: every `--check` problem of the result (the plan had none before)
+      const after = parsePlan(r.text, file);
+      after.reviews = parsed.reviews;
+      const owed = checkPlan(after, plans.map((p) => (p.slug === slug ? after : p))).problems;
+      const report = () => {
+        for (const l of r.lines) say(fmtR("change", { slug, line: l }));
+        if (owed.length) for (const p of owed) say(fmtN("migrateOwes", { slug, problem: p }));
+        else say(fmtN("migrateClean", { slug }));
+        return 0;
+      };
+      if (dryRun) return report();
+      let ok;
+      try { ok = writeAtomic(file, r.text, { expect: text }); } catch (e) { return refuse("failed", { slug, code: e.code ?? "error" }); }
+      if (ok) return report();
+      continue;
+    }
     const dodV = parsed.fm.dod ?? "1";
     // (5) already
     if (to === 2 && dodV === "2") return refuse("already", { slug, n: 2 });
@@ -1694,19 +2169,24 @@ export function stripV2(dir, { dryRun = false } = {}) {
   const storeReal = realpathSync(dir);
   const inside = (p) => { const r = realpathSync(p); return r === storeReal || r.startsWith(storeReal + sep); };
   const backupDir = join(dir, ".strip-v2");
+  // north-star A3 (14.3): a rubric-3 plan has no v0.1 or rubric-2 form; it is left as written and named, and an older
+  // checker refuses it by its rubric
+  const kept = (p) => /* ns-mutant:strip-rubric3 */rubricOf(p) === 3;
+  for (const p of loadPlans(dir)) if (kept(p)) console.log(plainText(fmtN("stripRubric3", { slug: showSlug(p.slug) })));
   // D15: v0.1 has no convergence rule, so a plan approved that way must get a READY review first. Checked before
   // anything is migrated or written, so a refused run leaves every plan as it was.
   for (const p of loadPlans(dir)) {
-    if (!/ · converged$/.test(p.fm.review ?? "") && !convergedOnRecord(p)) continue;
+    if (kept(p) || (!/ · converged$/.test(p.fm.review ?? "") && !convergedOnRecord(p))) continue;
     console.error(plainText(fmtA("stripConverged", { slug: showSlug(p.slug) })));
     return 1;
   }
   // dod 2 plans go back to dod 1 first (plan-readability D8): v0.1 knows neither titles nor S-n
-  for (const p of loadPlans(dir)) if (p.fm.dod === "2" && migratePlan(dir, p.slug, { to: 1, dryRun })) return 1;
+  for (const p of loadPlans(dir)) if (!kept(p) && p.fm.dod === "2" && migratePlan(dir, p.slug, { to: 1, dryRun })) return 1;
   const plans = loadPlans(dir);
   const { bySlug } = storeInfo(plans);
   const work = [];
   for (const p of plans) {
+    if (kept(p)) continue;
     const text = readFileSync(p.file, "utf8");
     const r = stripPlanText(text, bySlug);
     // orig: the bytes read (the compare target); text: the stripped result — spreading r over { text } overwrote the
@@ -1753,10 +2233,10 @@ export function renderIndex(plans, dir, opts = {}) {
     const r = c.report;
     const cwe = c.problems.filter((x) => / is checked without evidence/.test(x)).length;
     const flag = c.problems.length ? ` ⚠ ${c.problems.length}` : "";
-    return `| [${p.slug}](${p.slug}.md) | ${p.fm.title ?? ""} | ${p.fm.status ?? "?"}${flag} | ${p.fm.size ?? ""} | ${c.verified}/${c.total}${cwe ? ` (+${cwe} unverified ✓)` : ""} | ${r.baseline || "—"} | ${r.rate == null ? "—" : r.notStarted ? "n/a" : r.rate + " %"} | ${p.fm.parent && p.fm.parent !== "none" ? p.fm.parent : ""} |`;
+    return `| [${p.slug}](${p.slug}.md) | ${p.fm.title ?? ""} | ${p.fm.status ?? "?"}${r.partial && r.waiting.length ? " · partial" : ""}${flag} | ${p.fm.size ?? ""} | ${c.verified}/${c.total}${cwe ? ` (+${cwe} unverified ✓)` : ""} | ${r.baseline || "—"} | ${r.rate == null ? "—" : r.notStarted ? "n/a" : r.rate + " %"} | ${p.fm.parent && p.fm.parent !== "none" ? p.fm.parent : ""} |`;
   });
   const done = plans.filter((p) => p.fm.status === "done").map((p) => checks.get(p.slug).report).filter((r) => r.baseline > 0);
-  const sumB = done.reduce((s, r) => s + r.baseline, 0);
+  const sumB = done.reduce((s, r) => s + r.scored, 0); // north-star D14: a done · partial plan counts its verified baseline items
   const sumG = done.reduce((s, r) => s + r.discoveredDesign, 0);
   const agg = sumB ? Math.round((sumB / (sumB + sumG)) * 100) : null;
   const missedDone = {}, missedOpen = {};
@@ -2170,10 +2650,10 @@ export function exclusionLines(excluded) {
 }
 export const manifestHash = (included) => sha256(included.map((f) => `${f.path} ${f.sha}`).sort().join("\n")).slice(0, 12);
 
-// review.md's rubric block, without its `> ` markers
-export function rubricBlock(reviewMd) {
+// review.md's rubric block, without its `> ` markers; north-star D2: `heading` picks the rubric-3 block instead
+export function rubricBlock(reviewMd, heading = "The rubric") {
   const lines = reviewMd.replace(/\r\n/g, "\n").split("\n");
-  const at = lines.findIndex((l) => /^## The rubric\b/.test(l));
+  const at = lines.findIndex((l) => l === `## ${heading}` || l.startsWith(`## ${heading} `));
   if (at < 0) return "";
   const out = [];
   for (const l of lines.slice(at + 1)) { if (/^## /.test(l)) break; if (/^>/.test(l)) out.push(l.replace(/^> ?/, "")); }
@@ -2238,13 +2718,16 @@ export function reviewPrompt(dir, plans, args, { git = gitReader(), readBack = (
   const problems = checkPlan(plan, plans).problems;
   if (problems.length) return fail(fmtV("promptProblems", { slug, k: problems.length }));
   const { n, round } = nextRound(plan);
-  if (reviewer !== "human" && round > ROUND_CAP && !capCovered(plan, n)) return fail(fmtV("promptRoundCap", { n, r: round, k: n - 1 }));
+  if (reviewer !== "human" && round > roundCapOf(plan) && !capCovered(plan, n)) return fail(fmtV("promptRoundCap", { n, r: round, k: n - 1 }));
   const planText = new TextDecoder("utf-8").decode(readFileSync(plan.file));
   const red = redactPlan(planText);
   if (!red.hasLog) return fail(fmtV("promptRedaction", { what: "lacks the ## Log heading" }));
   if (red.blanked !== 15) return fail(fmtV("promptRedaction", { what: `has ${red.blanked} blanked Coverage rows, not 15` }));
   const refs = join(dirname(SELF), "..", "references");
-  const rubric = rubricBlock(readFileSync(join(refs, "review.md"), "utf8"));
+  const reviewMd = readFileSync(join(refs, "review.md"), "utf8");
+  const rubric = rubricBlock(reviewMd);
+  // north-star D2: a rubric-3 plan's reviewer is told what blocks, and asked for a line per layer and the sweep
+  const rubric3 = rubricOf(plan) === 3 ? rubricBlock(reviewMd, "Rubric 3 — what blocks") : "";
   const layers = readFileSync(join(refs, "layers.md"), "utf8");
 
   // git: the repository root, HEAD, and the status of every citation and of the plan itself (D9)
@@ -2284,7 +2767,7 @@ export function reviewPrompt(dir, plans, args, { git = gitReader(), readBack = (
   // rows and the plan — while the rubric and layers.md, the skill's own text, go verbatim
   let withheld = 0;
   const own = (x) => { const r = redactEnv(x, env); withheld += r.n; return r.text; };
-  parts.push(rubric, layers.replace(/\s+$/, ""), own(codeSection.replace(/\s+$/, "")));
+  parts.push(rubric, ...(rubric3 ? [rubric3] : []), layers.replace(/\s+$/, ""), own(codeSection.replace(/\s+$/, "")));
   if (scope) {
     const rows = scope.map((id) => { const a = plan.amendments.find((x) => x.id === id); return `- ${a.id} · layer ${a.layer} · ${a.ops.join(" ")} · ${a.why}`; });
     parts.push(`This is a scoped re-review of ${scope.join(", ")}:\n${own(rows.join("\n"))}\nThe rest of the plan is frozen context: it was reviewed before and is not regraded here. Still write your coverage line over all fifteen layers. Tag every finding about text outside this scope advisory, never blocking.`);
@@ -2347,7 +2830,7 @@ function selftest(deps = {}) {
     if (k === 11 && !opts.all) return `| 11 | ${name} | N/A | — | no human-facing surface: nightly job, checked src/jobs/ |`;
     if (k === opts.gap) return `| ${k} | ${name} | Gap | 1/${probes} | 6.2, 6.3 unanswered |`;
     // rubric 2 maps every probe of layers 2–14 to an item (plan-accuracy D3)
-    const mapped = (opts.rubric ?? 1) === 2 && k >= 2 && k <= 14
+    const mapped = (opts.rubric ?? 1) >= 2 && k >= 2 && k <= 14
       ? `${name} › ${probeIds(opts.rubric, k).map((x) => `${x} D1`).join("; ")}`
       : `${name} › D1`;
     const ptr = k === 1 || k === 15 ? name : mapped;
@@ -2646,6 +3129,14 @@ ${coverage().replace("| 3 | Inputs, outputs & data | Considered | 4/4 |", "| 3 |
     if (deps.timing) for (const line of v2.slowest) console.log(line);
     console.log(`selftest v0.2: ${v2.summary} in ${Math.round(performance.now() - startedAt)} ms`);
     if (!v2.ok) for (const d of v2.details) console.log(`  v0.2 failed: ${d}`);
+    // north-star: `--case <name>` still runs the whole suite, then answers for the named case alone — an unknown
+    // name is a failure, never a silent pass
+    if (deps.only !== undefined) {
+      const hits = v2.results.filter(([name]) => name === deps.only);
+      if (!hits.length) { console.log(`selftest: no case "${deps.only}"`); return 1; }
+      for (const [name, pass] of hits) console.log(`case ${name}: ${pass ? "pass" : "FAIL"}`);
+      return hits.every(([, pass]) => pass) ? 0 : 1;
+    }
     if (!ok) {
       console.log("  index-relative:", { under: footerOf(under), equal: footerOf(equal), outside: footerOf(outside), hostile: hostileFooter, driveLike: footerOf(driveLike), crossRoot: footerOf(crossRoot) });
       console.log("  legacy-footer:", legacyResults, "leak-scan:", { rendered: rendered.length, leaks, planted, manyLeaks, noEntropy });
@@ -2695,7 +3186,7 @@ function selftestV2(ctx) {
   const ITEMS_V2 = ITEMS.split("\n").map((l) => `${l} (fails when: the export is empty)`).join("\n");
   // a valid in-progress plan, like the v0.1 `good` fixture without its amendments; o overrides the parts a case needs
   const plan = (slug, o = {}) => {
-    const items = o.items ?? (String((o.fm ?? {}).rubric ?? (o.coverage ?? {}).rubric ?? 1) === "2" ? ITEMS_V2 : ITEMS);
+    const items = o.items ?? (["2", "3"].includes(String((o.fm ?? {}).rubric ?? (o.coverage ?? {}).rubric ?? 1)) ? ITEMS_V2 : ITEMS);
     return fm({ ...base, id: nextId(), slug, title: slug, ...(o.fm ?? {}) }) + `# DoD: ${slug}\n\n## Definition of Done\n${items}\n\n${sections}\n## Assumptions\n- A-1 · validated · Users are authenticated · source: src/auth.ts\n\n## Coverage\n${coverage(o.coverage ?? {})}\n## Baseline\n${o.baseline ?? items}\n\n## Amendments\n${o.amend ?? ""}\n${o.children !== undefined ? `## Children\n${o.children}\n\n` : ""}${o.extra ?? ""}## Log\n- 2026-09-14 · status → draft · plan\n${o.preReady ?? ""}- 2026-09-15 · status → ready · approve · review: codex\n- 2026-09-15 · status → in-progress · start\n${o.log ?? ""}`;
   };
   const withReviews = (files) => { const out = { ...files }; for (const f of Object.keys(files)) if (!f.endsWith(".reviews.md")) out[f.replace(/\.md$/, ".reviews.md")] = goodReviews; return out; };
@@ -3050,7 +3541,7 @@ function selftestV2(ctx) {
     const sec = t.slice(t.indexOf("## Rubric 2 — the accuracy additions"), t.indexOf("\n## ID legend"));
     // one per problem, warning or refusal named in D2–D7, D15, D20 and D23
     const EXPECTED = [
-      'rubric "<v>" must be 1 or 2',
+      'rubric "<v>" must be 1, 2 or 3',
       "layer <n>: probe <p> is not mapped to a D-item or a prose reason",
       "layer <n>: gating probe <p> cannot be answered by prose",
       "layer <n>: prose reason for <p> is shorter than 12 characters",
@@ -3318,7 +3809,7 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     refusal("cannot-read EILSEQ", bad, ["m"], fmtR("cannotRead", { path: rel(join(bad, "m.md")), code: "EILSEQ" }));
     expect("migrate nodeSupported", !nodeSupported("18.20.0") && nodeSupported("20.0.0") && nodeSupported("22.16.0"));
     // usage and node-old, spawned under the fs spy: zero calls inside the store
-    for (const [k, args] of Object.entries({ "to-3": ["--to", "3", "m"], "to-alone": ["m", "--to"], "dry-run-twice": ["m", "--dry-run", "--dry-run"], "two-slugs": ["m", "n"] })) {
+    for (const [k, args] of Object.entries({ "to-4": ["--to", "4", "m"], "to-alone": ["m", "--to"], "dry-run-twice": ["m", "--dry-run", "--dry-run"], "two-slugs": ["m", "n"] })) {
       const s0 = snapshot(d);
       const r = spied(d, ["--migrate", ...args, "--dir", d]);
       expect(`migrate usage ${k}`, r.code === 1 && r.out === "" && r.err === MESSAGES_READABILITY.usage && Array.isArray(r.calls) && r.calls.length === 0 && snapshot(d) === s0, JSON.stringify(r));
@@ -3347,18 +3838,23 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
   // rubric-sync (plan-accuracy D1): references/layers.md and the RUBRIC constant say the same thing
   {
     const md = readFileSync(join(dirname(SELF), "..", "references", "layers.md"), "utf8").replace(/\r/g, "");
-    const rows = [...md.matchAll(/^- (\d+)\.(\d) (⛔ )?(\(rubric 2\) )?/gm)].map((m) => ({ layer: Number(m[1]), id: `${m[1]}.${m[2]}`, gating: !!m[3], r2: !!m[4] }));
+    // north-star D5: a probe marked `(rubric 3)` belongs to rubric 3 only
+    const rows = [...md.matchAll(/^- (\d+)\.(\d) (⛔ )?(?:\(rubric ([23])\) )?/gm)].map((m) => ({ layer: Number(m[1]), id: `${m[1]}.${m[2]}`, gating: !!m[3], r2: m[4] === "2", r3: m[4] === "3" }));
     const countsFor = (keep) => { const c = Array(15).fill(0); for (const r of rows) if (keep(r)) c[r.layer - 1]++; return c; };
     const idsFor = (keep) => rows.filter((r) => keep(r) && r.gating).map((r) => r.id).sort();
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-    const c1 = countsFor((r) => !r.r2), c2 = countsFor(() => true);
-    const g1 = idsFor((r) => !r.r2), g2 = idsFor(() => true);
+    const c1 = countsFor((r) => !r.r2 && !r.r3), c2 = countsFor((r) => !r.r3), c3 = countsFor(() => true);
+    const g1 = idsFor((r) => !r.r2 && !r.r3), g2 = idsFor((r) => !r.r3), g3 = idsFor(() => true);
     const n = (r) => RUBRIC[r].counts.reduce((a, b) => a + b, 0);
-    const header = md.includes(`rubric 1 = ${n(1)} probes and ${RUBRIC[1].gating.length} gating`) && md.includes(`rubric 2 = ${n(2)} probes and ${RUBRIC[2].gating.length} gating`);
+    const header = md.includes(`rubric 1 = ${n(1)} probes and ${RUBRIC[1].gating.length} gating`) && md.includes(`rubric 2 = ${n(2)} probes and ${RUBRIC[2].gating.length} gating`) && md.includes(`rubric 3 = ${n(3)} probes and ${RUBRIC[3].gating.length} gating`);
     // every layer name in the file is the canonical one, in order
     const names = [...md.matchAll(/^## (\d+)\. (.+)$/gm)].filter((m) => Number(m[1]) <= 15).map((m) => m[2].replace(/\s+\*.*$/, "").trim());
-    expect("rubric-sync", same(c1, RUBRIC[1].counts) && same(c2, RUBRIC[2].counts) && same(g1, [...RUBRIC[1].gating].sort()) && same(g2, [...RUBRIC[2].gating].sort()) && header && same(names, LAYERS),
-      JSON.stringify({ c1, c2, g1, g2, header, names: names.filter((x, i) => x !== LAYERS[i]) }));
+    // north-star A7: the rubric layers.md names for new plans is the one SKILL.md writes
+    const skillMd = readFileSync(join(dirname(SELF), "..", "SKILL.md"), "utf8");
+    const newRubric = (md.match(/new plans are written at `rubric: (\d)`/) ?? [])[1], skillRubric = (skillMd.match(/status: draft`, `dod: 2`, `rubric: (\d)`/) ?? [])[1];
+    const newPlans = /* ns-mutant:rubric-new */!!newRubric && newRubric === skillRubric;
+    expect("rubric-sync", same(c1, RUBRIC[1].counts) && same(c2, RUBRIC[2].counts) && same(c3, RUBRIC[3].counts) && same(g1, [...RUBRIC[1].gating].sort()) && same(g2, [...RUBRIC[2].gating].sort()) && same(g3, [...RUBRIC[3].gating].sort()) && header && same(names, LAYERS) && newPlans,
+      JSON.stringify({ c1, c2, c3, g1, g2, g3, header, newRubric, skillRubric, names: names.filter((x, i) => x !== LAYERS[i]) }));
   }
   // fixture rubric (plan-accuracy D2)
   {
@@ -3380,8 +3876,8 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     const cR1 = one(rplan(1, { cov: { rows: { 11: { probes: "3/3" } } } }), 1);
     expect("rubric row-count at rubric 1", cR1.problems.length === 0, JSON.stringify(cR1.problems));
     // an unknown rubric value
-    const bad3 = one(rplan(2).replace(/^rubric: 2$/m, "rubric: 3"), 2);
-    expect("rubric value", bad3.problems.includes(fmtA("rubricValue", { v: "3" })), JSON.stringify(bad3.problems));
+    const bad3 = one(rplan(2).replace(/^rubric: 2$/m, "rubric: 4"), 2);
+    expect("rubric value", bad3.problems.includes(fmtA("rubricValue", { v: "4" })), JSON.stringify(bad3.problems));
     // the totals follow the rubric: 49/49 accepted, 45/45 refused
     expect("rubric coverage totals", one(rplan(2), 2).problems.length === 0, JSON.stringify(one(rplan(2), 2).problems));
     const wrong = one(rplan(2, { fm: { coverage_author: total(1) } }), 2);
@@ -3988,7 +4484,9 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
       const d = store(files);
       // field-fixes D10: the strip's exit and every pinned check's exit are asserted, as the fixture strip case does
       const strip = node([SELF, "--dir", d, "--strip-v2"]);
-      const runs = readdirSync(d).filter((f) => isPlanFile(d, f)).map((f) => { const r = node([PINNED_CHECKER, "--dir", d, "--check", f.slice(0, -3)]); return [f, r.status, r.stdout.split(/\r?\n/).filter((l) => l.startsWith("  ✗ ")).length]; });
+      const r3 = Object.entries(files).filter(([f, t]) => !f.endsWith(".reviews.md") && /^rubric: 3\s*$/m.test(t)).map(([f]) => f);
+      if (r3.length) expect("strip-v2 leaves this store's rubric-3 plans as written", r3.every((f) => readFileSync(join(d, f), "utf8") === files[f]), JSON.stringify(r3));
+      const runs = readdirSync(d).filter((f) => isPlanFile(d, f) && !r3.includes(f)).map((f) => { const r = node([PINNED_CHECKER, "--dir", d, "--check", f.slice(0, -3)]); return [f, r.status, r.stdout.split(/\r?\n/).filter((l) => l.startsWith("  ✗ ")).length]; });
       const left = runs.filter(([, code, n]) => code !== 0 || n);
       expect("strip-v2 on this store passes the pinned checker", strip.status === 0 && left.length === 0 && runs.length > 0, `strip exit ${strip.status}; pinned exits ${JSON.stringify(left)} of ${runs.length}`);
     }
@@ -5078,9 +5576,517 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     }
   }
 
+  // north-star D1, D2, D4, D5: rubric 3 — only what blocks, the reviewer told so, the components sweep, the design bar
+  {
+    const sumOf = (r) => RUBRIC[r].counts.reduce((x, y) => x + y, 0);
+    const tot = (r) => `15/15 layers · ${sumOf(r)}/${sumOf(r)} probes`;
+    // one review; `missing` is the sweep line (null leaves it out), `disp` the dispositions block
+    const rv = (body, o = {}) => `## Review 1 · 2026-09-15 · codex · plan commit abc1234\n${body}\n${o.missing === null ? "" : `${o.missing ?? "missing components: none"}\n`}${tot(o.r ?? 3)}\nVERDICT: ${o.v ?? "READY"}\n### Dispositions\n${o.disp ?? "- F1 · accepted · applied"}\n`;
+    // a rubric-3 plan carries its components (D3): one that every item serves, and a step that advances it
+    const parts = (items) => `## Components\n- C1 · **The export** The CSV export works · ${[...items.matchAll(/^- \[.\] (D\d+)/gm)].map((m) => m[1]).join(" ")}\n\n## Build plan\n1. Build the export · advances C1 · satisfies D1\n\n`;
+    const rp = (slug, r, o = {}) => plan(slug, { extra: r === 3 ? parts(o.items ?? ITEMS_V2) : "", ...o, fm: { rubric: String(r), coverage_author: tot(r), coverage_reviewer: tot(r), ...(r === 3 ? { risk: "an edge case found later is fixed as a defect" } : {}), ...(o.fm ?? {}) }, coverage: { rubric: r, all: true, ...(o.cov ?? {}) } });
+    const chk = (slug, r, reviews, o = {}) => checkIn(store({ [`${slug}.md`]: rp(slug, r, o), [`${slug}.reviews.md`]: reviews })).get(slug);
+    // a plan whose one review is a REVISE that does not stand as READY
+    const notReady = (slug) => `review is codex but ${slug}.reviews.md has no VERDICT: READY`;
+    const METHOD = "F1 blocking · 7.2 use a lock file and a retry loop for the writer";
+
+    // ns-blocking (D1)
+    {
+      const method = chk("nb", 3, rv(METHOD, { v: "REVISE" }));
+      const advisory = chk("nb", 3, rv(METHOD, { v: "REVISE", disp: "- F1 · rejected · advisory by rule — names no outcome, component, design bar or limit" }));
+      const what = chk("nb", 3, rv("F1 blocking · blocks: outcome · two writers lose an entry (7.2)", { v: "REVISE" }));
+      const old = chk("nb", 2, rv(METHOD, { v: "REVISE", r: 2, missing: null }));
+      const r = [
+        method.problems.includes(fmtN("blocksMissing", { n: 1, f: 1 })),
+        advisory.problems.length === 0,
+        what.problems.includes(notReady("nb")) && !what.problems.some((x) => x.includes("names no `blocks:")),
+        old.problems.includes(notReady("nb")) && !old.problems.some((x) => x.includes("names no `blocks:")),
+      ];
+      expect("ns-blocking", r.every(Boolean), JSON.stringify({ r, method: method.problems, advisory: advisory.problems, what: what.problems, old: old.problems }));
+    }
+
+    // ns-missing (D4)
+    {
+      const ADV = "F1 advisory · wording";
+      const none = chk("nm", 3, rv(ADV, { missing: null }));
+      const two = chk("nm", 3, rv(ADV, { missing: "missing components: undo; an export log" }));
+      const rejected = chk("nm", 3, rv(ADV, { v: "REVISE", missing: "missing components: undo; an export log", disp: "- F1 · accepted · applied\n- M1 · rejected · undo is out of scope (15.1)\n- M2 · rejected · the Log is the export log" }));
+      const accepted = chk("nm", 3, rv(ADV, { v: "REVISE", missing: "missing components: undo", disp: "- F1 · accepted · applied\n- M1 · accepted · +D3 undo" }));
+      const old = chk("nm", 2, rv(ADV, { r: 2, missing: null }));
+      const r = [
+        none.problems.includes(fmtN("missingLine", { n: 1 })),
+        two.problems.includes(fmtN("missingUndisposed", { n: 1, m: 1, name: "undo" })) && two.problems.includes(fmtN("missingUndisposed", { n: 1, m: 2, name: "an export log" })),
+        rejected.problems.length === 0,
+        accepted.problems.includes(notReady("nm")),
+        old.problems.length === 0,
+      ];
+      expect("ns-missing", r.every(Boolean), JSON.stringify({ r, none: none.problems, two: two.problems, rejected: rejected.problems, accepted: accepted.problems, old: old.problems }));
+    }
+
+    // ns-design-bar (D5)
+    {
+      const row11 = (p115) => ({ rows: { 11: { pointer: `${LAYERS[10]} › 11.1 D1; 11.2 D1; 11.3 D1; 11.4 D1${p115 ? `; ${p115}` : ""}` } } });
+      const withD3 = (d3) => `${ITEMS_V2}\n- [ ] D3 · **Calm look** The pages feel calm · manual: ${d3}`;
+      const bar = (p115, d3 = "the owner looks at it") => chk("nd", 3, rv("F1 advisory · wording"), { items: withD3(d3), cov: row11(p115) });
+      const noJudge = bar("11.5 D3");
+      const judged = bar("11.5 D3", "judge: the owner, against the brand page");
+      const unanswered = bar(null);
+      const prose = bar("11.5 prose: no design bar: internal tool, function only");
+      const check = bar("11.5 D1");
+      const old = chk("nd", 2, rv("F1 advisory · wording", { r: 2, missing: null }), { items: withD3("the owner looks at it"), cov: row11(null) });
+      const r = [
+        noJudge.problems.includes(fmtN("designBarItem", { d: "D3" })),
+        judged.problems.length === 0,
+        unanswered.problems.includes(fmtA("probeUnmapped", { n: 11, p: "11.5" })),
+        prose.problems.length === 0,
+        check.problems.length === 0,
+        old.problems.length === 0,
+      ];
+      expect("ns-design-bar", r.every(Boolean), JSON.stringify({ r, noJudge: noJudge.problems, judged: judged.problems, unanswered: unanswered.problems, prose: prose.problems, check: check.problems, old: old.problems }));
+    }
+
+    // ns-components (D3): every component served, every item serving one, every step advancing one
+    {
+      const ADV = rv("F1 advisory · wording");
+      const withParts = (comps, steps = "1. Build the export · advances C1 · satisfies D1") => `## Components\n${comps}\n\n## Build plan\n${steps}\n\n`;
+      const c = (extra) => chk("nc", 3, ADV, { extra });
+      const good = c(withParts("- C1 · **The export** The CSV export works · D1\n- C2 · **Clean code** Lint passes · D2", "1. Build the export · advances C1 · satisfies D1\n2. Lint it · advances C2 · satisfies D2"));
+      const orphan = c(withParts("- C1 · **The export** The CSV export works · D1"));
+      const empty = c(withParts("- C1 · **The export** The CSV export works · D1 D2\n- C2 · **Undo** An export can be taken back"));
+      const noStep = c(withParts("- C1 · **The export** The CSV export works · D1 D2", "1. Build the export · satisfies D1"));
+      const unknown = c(withParts("- C1 · **The export** The CSV export works · D1 D2 D9", "1. Build the export · advances C1 C7 · satisfies D1"));
+      const malformed = c(withParts("- C1 · **The export** The CSV export works · D1 D2\n- C2 · Undo without a bold title · D1"));
+      const none = c("");
+      const old = chk("nc", 2, rv("F1 advisory · wording", { r: 2, missing: null }), { extra: withParts("- C1 · **The export** only D1 · D1", "1. Build the export · satisfies D1") });
+      const r = [
+        good.problems.length === 0,
+        orphan.problems.includes(fmtN("itemOrphan", { d: "D2" })),
+        empty.problems.includes(fmtN("componentEmpty", { c: "C2" })),
+        noStep.problems.includes(fmtN("stepNoComponent", { k: 1 })),
+        unknown.problems.includes(fmtN("componentUnknownItem", { c: "C1", d: "D9" })) && unknown.problems.includes(fmtN("stepUnknownComponent", { k: 1, c: "C7" })),
+        malformed.problems.includes(fmtN("componentLine", { text: "- C2 · Undo without a bold title · D1" })),
+        none.problems.includes(fmtN("componentsMissing")),
+        old.problems.length === 0,
+      ];
+      expect("ns-components", r.every(Boolean), JSON.stringify({ r, good: good.problems, orphan: orphan.problems, empty: empty.problems, noStep: noStep.problems, unknown: unknown.problems, malformed: malformed.problems, none: none.problems, old: old.problems }));
+    }
+
+    // ns-light (D7): the profile by size and by the owner's choice, the risk line, `not in brief`
+    {
+      const ADV = rv("F1 advisory · wording");
+      // north-star A8: only an S plan is light by default, so the light fixtures are S
+      const chkS = (slug, r, review, o = {}) => chk(slug, r, review, { ...o, fm: { size: "S", ...(o.fm ?? {}) } });
+      const NIB = { rows: { 6: { pointer: `${LAYERS[5]} › 6.1 D1; 6.2 D1; 6.3 not in brief: the brief names no external service` }, 7: { pointer: `${LAYERS[6]} › 7.1 D1; 7.2 not in brief: one user, one session in the brief; 7.3 D1` } } };
+      const light = chkS("nl", 3, ADV, { cov: NIB });
+      const noRisk = chkS("nl", 3, ADV, { fm: { risk: "tbd" } });
+      const full = chkS("nl", 3, ADV, { fm: { profile: "full" }, cov: NIB });
+      const sizeL = chkS("nl", 3, ADV, { fm: { size: "L" }, cov: NIB });
+      const shortWhy = chkS("nl", 3, ADV, { cov: { rows: { 7: { pointer: `${LAYERS[6]} › 7.1 D1; 7.2 not in brief: n/a; 7.3 D1` } } } });
+      const bad = chkS("nl", 3, ADV, { fm: { profile: "medium" } });
+      // north-star A5: a gating probe (6.2) and a layer-10 probe (10.4) need a real answer
+      const gate = chkS("nl", 3, ADV, { cov: { rows: { 6: { pointer: `${LAYERS[5]} › 6.1 D1; 6.2 not in brief: the brief names no external service; 6.3 D1` }, 10: { pointer: `${LAYERS[9]} › 10.1 D1; 10.2 D1; 10.3 D1; 10.4 not in brief: the brief handles no personal data` } } } });
+      const old = chkS("nl", 2, rv("F1 advisory · wording", { r: 2, missing: null }), { cov: NIB });
+      const autoOf = (fm) => parsePlan(rp("na", 3, { fm }).replace("# DoD: na\n", "# DoD: na\n\n**Planned:** autonomously (assumptions marked reversible were decided without asking)\n"));
+      const autoS = autoOf({ size: "S" }), autoM = autoOf({ size: "M" }), lightM = parsePlan(rp("nm", 3, { fm: { size: "M", profile: "light" } }));
+      const r = [
+        light.problems.length === 0,
+        noRisk.problems.includes(fmtN("riskMissing")),
+        full.problems.includes(fmtN("notInBriefFull", { n: 6, p: "6.3" })) && full.problems.includes(fmtN("notInBriefFull", { n: 7, p: "7.2" })) && !full.problems.includes(fmtN("riskMissing")),
+        sizeL.problems.includes(fmtN("notInBriefFull", { n: 7, p: "7.2" })),
+        shortWhy.problems.includes(fmtN("notInBriefShort", { n: 7, p: "7.2" })),
+        bad.problems.includes(fmtN("profileValue", { v: "medium" })),
+        gate.problems.includes(fmtN("notInBriefGating", { n: 6, p: "6.2" })) && gate.problems.includes(fmtN("notInBriefGating", { n: 10, p: "10.4" })),
+        old.problems.includes(fmtA("probeUnmapped", { n: 7, p: "7.2" })) && !old.problems.some((x) => x.includes("not in brief")),
+        autoS.autonomous === true && profileOf(autoS) === "light" && profileOf(parsePlan(rp("nf", 3, { fm: { size: "L" } }))) === "full",
+        // north-star A8: M is full by default, autonomous or not; an explicit `profile: light` still wins
+        /* ns-a8 */autoM.autonomous === true && profileOf(autoM) === "full" && profileOf(parsePlan(rp("nm", 3, { fm: { size: "M" } }))) === "full" && profileOf(lightM) === "light",
+      ];
+      expect("ns-light", r.every(Boolean), JSON.stringify({ r, light: light.problems, noRisk: noRisk.problems, full: full.problems, sizeL: sizeL.problems, shortWhy: shortWhy.problems, bad: bad.problems, gate: gate.problems, old: old.problems }));
+    }
+
+    // ns-rounds (D8): freeze after the profile's rounds with accepted risks, the cap, advice after READY
+    {
+      const BLOCK = "F1 blocking · blocks: limit · two writers lose an entry (7.2)";
+      const rvn = (n, date, body, o = {}) => `## Review ${n} · ${date} · codex · plan commit abc1234\n${body}\nmissing components: none\n${tot(3)}\nVERDICT: ${o.v ?? "REVISE"}\n### Dispositions\n${o.disp ?? "- F1 · accepted · applied"}\n`;
+      // the freeze reviews precede the fixture's approval (2026-09-15); the cap reviews fall after the cap rule's start
+      const two = rvn(1, "2026-09-14", BLOCK) + rvn(2, "2026-09-15", BLOCK);
+      const three = rvn(1, "2026-10-01", BLOCK) + rvn(2, "2026-10-02", BLOCK) + rvn(3, "2026-10-03", BLOCK);
+      const RISK = (n) => `- A-2 · assumed · risk · two writers may lose an entry; the owner accepts it · finding: Review ${n} F1`;
+      const withRisk = (text, n) => text.replace("- A-1 · validated · Users are authenticated · source: src/auth.ts", `$&\n${RISK(n)}`);
+      const at = (slug, reviews, o = {}, risk = null) => { const os = { ...o, fm: { size: "S", ...(o.fm ?? {}) } }; return checkIn(store({ [`${slug}.md`]: risk === null ? rp(slug, 3, os) : withRisk(rp(slug, 3, os), risk), [`${slug}.reviews.md`]: reviews })).get(slug); };
+      const FROZEN = { fm: { review: "codex · frozen" } };
+      const frozen = at("nr", two, FROZEN, 2);
+      const noRisk = at("nr", two, FROZEN);
+      const early = at("nr", rvn(1, "2026-09-15", BLOCK), FROZEN, 1);
+      const fullAt2 = at("nr", two, { fm: { review: "codex · frozen", profile: "full" } }, 2);
+      const lightCap = at("nr", three, { fm: { review: "pending" } });
+      const fullCap = at("nr", three, { fm: { review: "pending", profile: "full" } });
+      // advice after READY: an amendment citing a READY review's advisory finding, and one citing a blocking finding
+      const ready = rvn(1, "2026-09-15", `${BLOCK}\nF2 advisory · add a retry to the writer`, { v: "READY", disp: "- F1 · accepted · applied\n- F2 · accepted · deferred" });
+      const ITEMS3 = `${ITEMS_V2}\n- [ ] D3 · **Retry** The writer retries once · test: retry.test.ts (fails when: the retry is absent)`;
+      const amend = (f) => at("ns", ready, { items: ITEMS3, baseline: ITEMS_V2, amend: `- A1 · 2026-09-16 · discovered · +D3 · layer: 7.2 · Review 1 F${f} asked for a retry\n` });
+      const adv = amend(2), blk = amend(1);
+      const old = checkIn(store({ "no.md": rp("no", 2, { fm: { review: "codex · frozen" } }), "no.reviews.md": rv("F1 advisory · wording", { r: 2, missing: null }) })).get("no");
+      // north-star A6: an outcome is never frozen; an autonomous plan's frozen risk needs the owner's or delegate's accept line
+      const outcome = at("nr", two.replaceAll("blocks: limit", "blocks: outcome"), FROZEN, 2);
+      const AUTO = (o = {}) => ({ ...o, fm: { size: "S", ...FROZEN.fm, ...(o.fm ?? {}) }, log: o.log ?? "" });
+      const auto = (o) => { const text = withRisk(rp("nq", 3, AUTO(o)), 2).replace("# DoD: nq\n", "# DoD: nq\n\n**Planned:** autonomously (assumptions marked reversible were decided without asking)\n"); return checkIn(store({ "nq.md": text, "nq.reviews.md": two })).get("nq"); };
+      const ACC = (who, date = "2026-09-15") => `- ${date} · note · accept · Review 2 F1 · ${who}\n`;
+      const autoNone = auto(), autoOwner = auto({ log: ACC("owner") }), autoEarly = auto({ log: ACC("owner", "2026-09-14") });
+      const autoSam = auto({ fm: { delegate: "sam" }, log: "- 2026-09-14 · note · owner · delegate · sam\n" + ACC("sam") }), autoBob = auto({ log: ACC("bob") });
+      const r = [
+        frozen.problems.length === 0,
+        noRisk.problems.includes(fmtN("frozenRisk", { v: "codex · frozen", n: 2, f: 1 })),
+        early.problems.includes(fmtN("frozenRound", { v: "codex · frozen", n: 1, r: 1, profile: "light", cap: 2 })),
+        fullAt2.problems.includes(fmtN("frozenRound", { v: "codex · frozen", n: 2, r: 2, profile: "full", cap: 3 })),
+        lightCap.problems.includes(fmtV("roundCap", { n: 3, r: 3, k: 2 })),
+        !fullCap.problems.includes(fmtV("roundCap", { n: 3, r: 3, k: 2 })),
+        adv.problems.includes(fmtN("advisoryAmendment", { a: "A1", n: 1, f: 2 })),
+        !blk.problems.some((x) => x.includes("an advisory finding of a READY review")),
+        old.problems.includes(fmtN("frozenRubric", { v: "codex · frozen" })),
+        outcome.problems.includes(fmtN("frozenOutcome", { v: "codex · frozen", n: 2, f: 1 })),
+        autoNone.problems.includes(fmtN("frozenUnaccepted", { v: "codex · frozen", n: 2, f: 1 })),
+        !autoOwner.problems.some((x) => x.includes("frozen")),
+        autoEarly.problems.includes(fmtN("frozenUnaccepted", { v: "codex · frozen", n: 2, f: 1 })),
+        !autoSam.problems.some((x) => x.includes("frozen")),
+        autoBob.problems.includes(fmtN("frozenUnaccepted", { v: "codex · frozen", n: 2, f: 1 })),
+      ];
+      expect("ns-rounds", r.every(Boolean), JSON.stringify({ r, outcome: outcome.problems, autoNone: autoNone.problems, autoOwner: autoOwner.problems, autoEarly: autoEarly.problems, autoSam: autoSam.problems, autoBob: autoBob.problems, frozen: frozen.problems, noRisk: noRisk.problems, early: early.problems, fullAt2: fullAt2.problems, lightCap: lightCap.problems, fullCap: fullCap.problems, adv: adv.problems, blk: blk.problems, old: old.problems }));
+    }
+
+    // ns-freeze (D9): after `start`, a promise-preserving amendment is a Log note; 10 % or 2 packages owe a scoped
+    // re-review, 25 % a full one and a version line. The fixture starts on 2026-09-15; its Review 1 is that day.
+    {
+      // n items; `change` rewords the statement of the ids it names, so an amendment over them changes a promise
+      const itemsOf = (n, change = []) => Array.from({ length: n }, (_, k) => `- [ ] D${k + 1} · **Part ${k + 1}** Part ${k + 1} ${change.includes(k + 1) ? "works offline" : "works"} · test: p${k + 1}.test.ts (fails when: part ${k + 1} breaks)`).join("\n");
+      const am = (id, ops, extra = "") => `- ${id} · 2026-09-16 · discovered · ${ops} · layer: 3.1 · ${extra}the part was found to need more\n`;
+      const rv2 = (scope, rb = 3) => `## Review 2 · 2026-09-16 · codex · plan commit abc1234${scope ? ` · scope ${scope}` : ""}\nF1 advisory · wording\n${rb === 3 ? "missing components: none\n" : ""}${tot(rb)}\nVERDICT: READY\n### Dispositions\n- F1 · accepted · applied\n`;
+      const VERSION = "- 2026-09-16 · version · v2 · three parts reworded after the full re-review\n";
+      const fz = (slug, r, { n, change = [], amend, reviews = "", log = "", extra, fm = {} }) => chk(slug, r, rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}) + reviews, { items: itemsOf(n, change), baseline: itemsOf(n), amend, log, fm, ...(extra ? { extra } : {}) });
+      const NEW = (p) => p.problems.filter((x) => x.includes("after `start`"));
+      const promise = fz("nz", 3, { n: 10, amend: am("A1", "~D1") });
+      const dash = fz("nz", 3, { n: 10, amend: "- A1 · 2026-09-16 · external · — · layer: 6.1 · the host changed a default\n" });
+      const added = chk("nz", 3, rv("F1 advisory · wording"), { items: `${itemsOf(11)}\n- [ ] D12 · **Part 12** Part 12 works · test: p12.test.ts (fails when: part 12 breaks)`, baseline: itemsOf(11), amend: am("A1", "+D12") });
+      const eleven = fz("nz", 3, { n: 9, change: [1], amend: am("A1", "~D1") });
+      const elevenScoped = fz("nz", 3, { n: 9, change: [1], amend: am("A1", "~D1"), reviews: rv2("A1") });
+      const elevenPending = fz("nz", 3, { n: 9, change: [1], amend: am("A1", "~D1"), fm: { review: "pending" } });
+      // two leaves of 10 and 11 items; one item reworded in each is 2 of 21 (9.5 %, printed 9 — percents print rounded down)
+      const wbs = (items) => `## Components\n- C1 · **The parts** Every part works · ${[...items.matchAll(/^- \[.\] (D\d+)/gm)].map((m) => m[1]).join(" ")}\n\n## Build plan\n1. Build parts 1-10 · advances C1 · satisfies D1\n2. Build parts 11-21 · advances C1 · satisfies D11\n\n## Work breakdown\n- W1 · **Parts**\n- W1.1 · **First half** · items: ${Array.from({ length: 10 }, (_, k) => `D${k + 1}`).join(" ")} · steps: 1\n- W1.2 · **Second half** · items: ${Array.from({ length: 11 }, (_, k) => `D${k + 11}`).join(" ")} · steps: 2\n\n`;
+      const twoPkg = fz("nz", 3, { n: 21, change: [1, 11], amend: am("A1", "~D1") + am("A2", "~D11"), extra: wbs(itemsOf(21)) });
+      const thirty = { n: 10, change: [1, 2, 3], amend: am("A1", "~D1 ~D2 ~D3") };
+      const thirtyScoped = fz("nz", 3, { ...thirty, reviews: rv2("A1"), log: VERSION });
+      const thirtyFull = fz("nz", 3, { ...thirty, reviews: rv2(null), log: VERSION });
+      const thirtyNoVersion = fz("nz", 3, { ...thirty, reviews: rv2(null) });
+      // a scoped review never starts a new set: the 30 % change it approved is still counted after a later small one
+      const thirtyThenSmall = fz("nz", 3, { n: 10, change: [1, 2, 3, 4], amend: am("A1", "~D1 ~D2 ~D3") + "- A2 · 2026-09-17 · discovered · ~D4 · layer: 3.1 · the part was found to need more\n", reviews: rv2("A1"), log: VERSION });
+      const oldPromise = fz("nz", 2, { n: 10, amend: am("A1", "~D1") });
+      const oldThirty = fz("nz", 2, { ...thirty, reviews: rv2("A1", 2) });
+      const v = (ids, k, n, p, w, date = "2026-09-16") => ({ ids, k, n, p, w, date });
+      const r = [
+        promise.problems.includes(fmtN("freezePromise", { a: "A1" })),
+        dash.problems.includes(fmtN("freezePromise", { a: "A1" })),
+        !added.problems.includes(fmtN("freezePromise", { a: "A1" })) && NEW(added).length === 0,
+        eleven.problems.includes(fmtN("freezeScoped", v("A1", 1, 9, 11, 0))) && !eleven.problems.includes(fmtN("freezePromise", { a: "A1" })),
+        NEW(elevenScoped).length === 0,
+        elevenPending.warnings.includes(fmtN("freezeAwaiting", { ...v("A1", 1, 9, 11, 0), kind: "scoped" })) && NEW(elevenPending).length === 0,
+        twoPkg.problems.includes(fmtN("freezeScoped", v("A1, A2", 2, 21, 9, 2))),
+        thirtyScoped.problems.includes(fmtN("freezeFull", v("A1", 3, 10, 30, 0))) && !thirtyScoped.problems.some((x) => x.includes("`version` Log line")),
+        NEW(thirtyFull).length === 0,
+        thirtyNoVersion.problems.includes(fmtN("freezeVersion", v("A1", 3, 10, 30, 0))) && !thirtyNoVersion.problems.some((x) => x.includes("full re-review")),
+        NEW(oldPromise).length === 0 && NEW(oldThirty).length === 0,
+        thirtyThenSmall.problems.includes(fmtN("freezeFull", v("A1, A2", 4, 10, 40, 0, "2026-09-17"))),
+      ];
+      expect("ns-freeze", r.every(Boolean), JSON.stringify({ r, promise: promise.problems, dash: dash.problems, added: added.problems, eleven: eleven.problems, elevenScoped: elevenScoped.problems, elevenPending: elevenPending.warnings, twoPkg: twoPkg.problems, thirtyScoped: thirtyScoped.problems, thirtyFull: thirtyFull.problems, thirtyNoVersion: thirtyNoVersion.problems, oldPromise: oldPromise.problems, oldThirty: oldThirty.problems, thirtyThenSmall: thirtyThenSmall.problems }));
+    }
+
+    // ns-strip (A3, 14.3): --strip-v2 leaves a rubric-3 plan as written, names it, and strips the rest
+    {
+      const three = rp("nt", 3, {}), two = rp("nu", 2, {});
+      const d = store({ "nt.md": three, "nu.md": two });
+      const out = node([SELF, "--dir", d, "--strip-v2"]);
+      const r = [
+        out.status === 0,
+        readFileSync(join(d, "nt.md"), "utf8") === three,
+        out.stdout.includes(fmtN("stripRubric3", { slug: "nt" })),
+        readFileSync(join(d, "nu.md"), "utf8") !== two,
+      ];
+      expect("ns-strip", r.every(Boolean), JSON.stringify({ r, out: out.stdout.slice(0, 400), err: out.stderr.slice(0, 400) }));
+    }
+
+    // ns-host-check (D11): `host-check: <name> · <command>` is accepted at rubric 3, with matching evidence
+    {
+      const HC = (detail, x = "x") => `${ITEMS_V2}\n- [${x}] D3 · **CI green** The project's own CI passes · host-check: ${detail}`;
+      const EV = "- 2026-09-16 · D3 · pass · host-check: ci · npm run ci · abc1234 · claude\n";
+      const hc = (slug, r, detail, x, log = "") => chk(slug, r, rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}), { items: HC(detail, x), baseline: HC(detail, " "), log });
+      const valid = hc("nh", 3, "ci · npm run ci", "x", EV);
+      const unproven = hc("nh", 3, "ci · npm run ci", "x");
+      const noCmd = hc("nh", 3, "ci", " ");
+      const emptyCmd = hc("nh", 3, "ci · ", " ");
+      const old = hc("nh", 2, "ci · npm run ci", " ");
+      const r = [
+        valid.problems.length === 0,
+        unproven.problems.some((x) => x.startsWith("D3 (CI green) is checked without evidence")),
+        noCmd.problems.includes(fmtN("hostCheckForm", { d: "D3" })),
+        emptyCmd.problems.includes(fmtN("hostCheckForm", { d: "D3" })),
+        old.problems.includes(fmtN("hostCheckRubric", { d: "D3" })) && !old.problems.includes(fmtN("hostCheckForm", { d: "D3" })),
+      ];
+      expect("ns-host-check", r.every(Boolean), JSON.stringify({ r, valid: valid.problems, unproven: unproven.problems, noCmd: noCmd.problems, emptyCmd: emptyCmd.problems, old: old.problems }));
+    }
+
+    // ns-budget-check (D12): the latest budget note dod-effort logged, past 25 %, is a rubric-3 warning — never a
+    // problem, and never on a rubric-2 plan
+    {
+      const BN = (p, date = "2026-09-16") => `- ${date} · note · budget · planning ${p} % of measured effort\n`;
+      const bc = (slug, r, log) => chk(slug, r, rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}), { log });
+      const over = (p) => fmtN("budgetOver", { slug: "nb", p, b: PLANNING_BUDGET_PCT });
+      const base = bc("nb", 3, "");
+      const thirty = bc("nb", 3, BN(30));
+      const twenty = bc("nb", 3, BN(20));
+      const edge = bc("nb", 3, BN(25));
+      const later = bc("nb", 3, BN(30) + BN(20, "2026-09-17"));
+      const relapse = bc("nb", 3, BN(20) + BN(31, "2026-09-17"));
+      const old = bc("nb", 2, BN(30));
+      const BUD = (p) => p.warnings.filter((x) => x.startsWith("planning over budget"));
+      const r = [
+        thirty.warnings.includes(over(30)) && BUD(thirty).length === 1 && thirty.problems.length === base.problems.length && !thirty.problems.some((x) => x.includes("budget")),
+        thirty.warnings.includes("planning over budget: nb logged 30 % (budget 25 %) — freeze the plan and build"),
+        BUD(twenty).length === 0 && BUD(edge).length === 0 && BUD(base).length === 0,
+        BUD(later).length === 0, relapse.warnings.includes(over(31)) && BUD(relapse).length === 1,
+        BUD(old).length === 0 && !old.problems.some((x) => x.includes("budget")),
+      ];
+      expect("ns-budget-check", r.every(Boolean), JSON.stringify({ r, thirty: thirty.warnings, thirtyP: thirty.problems, baseP: base.problems, twenty: twenty.warnings, old: old.warnings }));
+    }
+
+    // ns-prompt (D2): the rubric-3 block is in a rubric-3 plan's prompt, and only there
+    {
+      const noGit3 = gitReader({ run: () => ({ status: 128, stderr: "fatal: not a git repository", stdout: "" }) });
+      const build = (slug, r) => {
+        const d = store({ [`${slug}.md`]: rp(slug, r), [`${slug}.reviews.md`]: rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}) });
+        const t = join(d, "tmp"); mkdirSync(t, { recursive: true });
+        return reviewPrompt(d, loadPlans(d), { slug, reviewer: "codex" }, { git: noGit3, tmp: t, env: {} });
+      };
+      const p3 = build("np", 3), p2 = build("nq", 2);
+      const RULE = "A finding is `blocking` only when the finished product would fail at something";
+      const flat = (x) => (x.text ?? "").replace(/\n\s*/g, " ");
+      const t3 = flat(p3), t2 = flat(p2);
+      const r = [
+        p3.code === 0, t3.includes(RULE), t3.includes("`L<n> · Considered | Gap | N/A · <finding ids, or no finding>`"), t3.includes("`missing components: none`"),
+        t3.includes("`blocks: outcome`, `blocks: component`, `blocks: design` or `blocks: limit`"),
+        p2.code === 0, !t2.includes(RULE), !t2.includes("`missing components: none`"),
+        // A4: the forms rubric 3 allows, so the reviewer does not take them for defects
+        t3.includes("`host-check: <name> · <command>`") && t3.includes("`not in brief: <reason>`"), !t2.includes("What rubric 3 allows"),
+      ];
+      expect("ns-prompt", r.every(Boolean), JSON.stringify({ r, p3: p3.lines, p2: p2.lines }));
+    }
+
+    // ns-delegate (D13): only the owner names the delegate; a delegate answer names who gave it; an owner-only step
+    // waits for the owner; the builder never reviews or accepts its own work
+    {
+      const ACCEPT = (x = "") => `${ITEMS_V2}\n- [ ] D3 · **Accepted** The owner accepts the export${x} · manual: the owner opens the export and says yes`;
+      const OWNER = (who = "sam", date = "2026-09-15") => `- ${date} · note · owner · delegate · ${who}\n`;
+      const BUILT = "- 2026-09-16 · D1 · pass · test: export.test.ts (9 pass) · abc1234 · claude\n";
+      const PASS3 = (who) => `- 2026-09-16 · D3 · pass · manual: opened the export, said yes · abc1234 · ${who}\n`;
+      const ANSWER = (who) => `- 2026-09-16 · note · delegate · ${who}CSV is the format the owner wants\n`;
+      const HUMAN = (by) => `## Review 1 · 2026-09-15 · human · by ${by} · plan commit abc1234\nF1 advisory · wording\nmissing components: none\n${tot(3)}\nVERDICT: READY\n### Dispositions\n- F1 · accepted · applied\n`;
+      const dg = (r, { items = ACCEPT(), log = "", fm = {}, reviews } = {}) => chk("ng", r, reviews ?? rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}), { items, log, fm });
+      const SAM = { delegate: "sam" };
+      const good = dg(3, { fm: SAM, log: OWNER() + BUILT + PASS3("sam") + ANSWER("sam · ") });
+      const replaced = dg(3, { fm: { delegate: "alex" }, log: OWNER() + OWNER("alex", "2026-09-16") + PASS3("alex") });
+      const changed = dg(3, { fm: { delegate: "alex" }, log: OWNER() });
+      const unlogged = dg(3, { fm: SAM });
+      const notSet = dg(3, { log: OWNER() });
+      const roleWho = dg(3, { fm: SAM, log: OWNER() + PASS3("delegate") });
+      const noAuthor = dg(3, { fm: SAM, log: OWNER() + ANSWER("") });
+      const IRREV = ACCEPT(" — an irreversible public push");
+      const irrev = dg(3, { fm: SAM, items: IRREV, log: OWNER() + PASS3("sam") });
+      const irrevOwner = dg(3, { fm: SAM, items: IRREV, log: OWNER() + PASS3("kd") });
+      const tagged = dg(3, { fm: SAM, items: `${ITEMS_V2}\n- [ ] D3 · **Pay** The owner pays the invoice · manual: owner-only — the owner pays and says so`, log: OWNER() + PASS3("sam") });
+      const selfReview = dg(3, { fm: { review: "human" }, log: BUILT, reviews: HUMAN("claude") });
+      const otherReview = dg(3, { fm: { review: "human" }, log: BUILT, reviews: HUMAN("kd") });
+      const namedBuilder = dg(3, { fm: { builder: "codex" } });
+      const selfAccept = dg(3, { log: BUILT + PASS3("claude") });
+      // every fault at once, at rubric 2: the same problems as the clean rubric-2 plan
+      const old = dg(2, { fm: { delegate: "alex", builder: "codex" }, items: IRREV, log: OWNER() + BUILT + PASS3("alex") + PASS3("delegate") + PASS3("claude") + ANSWER("") });
+      const oldClean = dg(2);
+      const r = [
+        good.problems.length === 0,
+        replaced.problems.length === 0,
+        changed.problems.includes(fmtN("delegateUnlogged", { who: "alex", last: "sam" })),
+        unlogged.problems.includes(fmtN("delegateUnlogged", { who: "sam", last: "none logged" })),
+        notSet.problems.includes(fmtN("delegateNotSet", { who: "sam", date: "2026-09-15" })),
+        roleWho.problems.includes(fmtN("delegateAuthor", { where: "D3 evidence on 2026-09-16", d: "sam", got: "delegate" })),
+        noAuthor.problems.includes(fmtN("delegateAuthor", { where: "Log note on 2026-09-16", d: "sam", got: "CSV is the format the owner wants" })),
+        irrev.problems.includes(fmtN("delegateOwnerOnly", { d: "D3", date: "2026-09-16", who: "sam" })),
+        irrevOwner.problems.length === 0,
+        tagged.problems.includes(fmtN("delegateOwnerOnly", { d: "D3", date: "2026-09-16", who: "sam" })),
+        selfReview.problems.includes(fmtN("builderReviews", { n: 1, who: "claude" })),
+        otherReview.problems.length === 0,
+        namedBuilder.problems.includes(fmtN("builderReviews", { n: 1, who: "codex" })),
+        selfAccept.problems.includes(fmtN("builderAccepts", { d: "D3", date: "2026-09-16", who: "claude" })),
+        oldClean.problems.length === 0 && JSON.stringify(old.problems) === JSON.stringify(oldClean.problems),
+      ];
+      expect("ns-delegate", r.every(Boolean), JSON.stringify({ r, good: good.problems, replaced: replaced.problems, changed: changed.problems, unlogged: unlogged.problems, notSet: notSet.problems, roleWho: roleWho.problems, noAuthor: noAuthor.problems, irrev: irrev.problems, irrevOwner: irrevOwner.problems, tagged: tagged.problems, selfReview: selfReview.problems, otherReview: otherReview.problems, namedBuilder: namedBuilder.problems, selfAccept: selfAccept.problems, old: old.problems, oldClean: oldClean.problems }));
+    }
+
+    // ns-partial (D14): a plan whose only open item waits on the owner closes `done · partial`, scored over its verified
+    // items, with the waiting list in --check and in its Report; a later pass brings the rate back to every item
+    {
+      const W = (x = " ") => `- [${x}] D3 · **Proof run** The owner reruns the brief · manual: waiting on the owner or their delegate; the Log carries \`note · proof · PASS|FAIL\``;
+      const D4 = "- [x] D4 · **Retry** The writer retries once · test: retry.test.ts (fails when: the retry is absent)";
+      const done12 = ITEMS_V2.replace(/- \[ \]/g, "- [x]");
+      const items = (w = " ", first = done12) => `${first}\n${W(w)}\n${D4}`;
+      const AM = "- A1 · 2026-09-14 · discovered · +D4 · layer: 7.2 · changes: outcome · two writers lost an entry\n";
+      const PASSES = "- 2026-09-16 · D1 · pass · test: export.test.ts · abc1234 · claude\n- 2026-09-16 · D2 · pass · cmd: npm run lint → 0 errors · abc1234 · claude\n- 2026-09-16 · D4 · pass · test: retry.test.ts · abc1234 · claude\n";
+      const CLOSE = (how) => `- 2026-09-17 · status → done · ${how}\n`;
+      const LATER = "- 2026-09-18 · D3 · pass · manual: reran the brief, PASS · abc1234 · kd\n";
+      const REPORT = (txt = "Prediction rate 2 / (2 + 1) = 67 % · waiting on the owner: D3") => `\n## Report\n${txt}\n`;
+      const DONE = { status: "done", closed: "2026-09-17" };
+      const pp = (r, { it = items(), log }) => rp("np", r, { items: it, baseline: `${ITEMS_V2}\n${W()}`, amend: AM, log, fm: /status → done/.test(log) ? DONE : {} });
+      const run = (r, o) => { const d = store({ "np.md": pp(r, o), "np.reviews.md": rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}) }); return { c: checkIn(d).get("np"), out: cli(d, "--check", "np") }; };
+      const partial = run(3, { log: PASSES + CLOSE("close · partial") + REPORT() });
+      const full = run(3, { log: PASSES + CLOSE("close") + REPORT() });
+      const other = run(3, { it: items(" ", ITEMS_V2.replace("- [ ] D1", "- [x] D1")), log: PASSES.replace(/^.* D2 · pass .*\n/m, "") + CLOSE("close · partial") + REPORT() });
+      const unlisted = run(3, { log: PASSES + CLOSE("close · partial") + REPORT("Prediction rate 2 / (2 + 1) = 67 %") });
+      const later = run(3, { it: items("x"), log: PASSES + CLOSE("close · partial") + LATER + REPORT() });
+      const ready = run(3, { log: PASSES });
+      const old = run(2, { log: PASSES + CLOSE("close · partial") + REPORT() });
+      const WAIT = fmtN("partialWaiting", { k: 1, ids: "D3", b: 2, n: 3 });
+      const r = [
+        partial.c.problems.length === 0 && partial.out.code === 0,
+        partial.c.report.rate === 67 && partial.c.report.scored === 2 && partial.c.report.baseline === 3,
+        partial.c.info.includes(WAIT) && partial.out.out.includes(WAIT) && partial.out.out.includes("np · done · partial · verified 3/4"),
+        full.c.problems.includes("status done but unverified items: D3") && full.c.report.rate === 75,
+        other.c.problems.includes("status done but unverified items: D2"),
+        unlisted.c.problems.includes(fmtN("partialReport", { d: "D3" })),
+        later.c.problems.length === 0 && later.c.report.rate === 75 && later.c.info.includes(fmtN("partialComplete", { date: "2026-09-17" })) && !later.out.out.includes("· partial · verified"),
+        ready.c.info.includes(fmtN("partialReady", { ids: "D3" })),
+        old.c.problems.includes("transition to done must read `status → done · close`") && old.c.problems.includes("status done but unverified items: D3") && old.c.report.rate === 75 && !old.c.info.some((x) => x.startsWith("done · partial")),
+      ];
+      expect("ns-partial", r.every(Boolean), JSON.stringify({ r, partial: [partial.c.problems, partial.c.info, partial.c.report.rate, partial.out], full: full.c.problems, other: other.c.problems, unlisted: unlisted.c.problems, later: [later.c.problems, later.c.info, later.c.report.rate], ready: ready.c.info, old: [old.c.problems, old.c.report.rate] }));
+    }
+
+    // ns-scoring (D15): a rubric-3 discovered amendment names what it changes; a `note · method` Log line is never scored
+    {
+      const ITEMS3 = `${ITEMS_V2}\n- [ ] D3 · **Retry** The writer retries once · test: retry.test.ts (fails when: the retry is absent)`;
+      const AM = (why) => `- A1 · 2026-09-14 · discovered · +D3 · layer: 7.2 · ${why}\n`;
+      const NOTE = "- 2026-09-16 · note · method · the writer now renames a temp file instead of taking a lock\n";
+      const sc = (r, amend, log = "") => chk("ns", r, rv("F1 advisory · wording", r === 2 ? { r: 2, missing: null } : {}), amend === null ? { log } : { items: ITEMS3, baseline: ITEMS_V2, amend: AM(amend), log });
+      const method = sc(3, "switched the writer to a temp-file rename");
+      const what = sc(3, "changes: outcome · two writers lost an entry");
+      const noted = sc(3, "changes: outcome · two writers lost an entry", NOTE);
+      const bare = sc(3, null), bareNoted = sc(3, null, NOTE);
+      const old = sc(2, "switched the writer to a temp-file rename");
+      const r = [
+        method.problems.includes(fmtN("changesMissing", { a: "A1" })),
+        what.problems.length === 0 && what.report.rate === 67,
+        noted.problems.length === 0 && JSON.stringify(noted.report) === JSON.stringify(what.report),
+        bare.report.rate === 100 && JSON.stringify(bareNoted.report) === JSON.stringify(bare.report) && bareNoted.problems.length === 0,
+        old.problems.length === 0 && old.report.rate === method.report.rate,
+      ];
+      expect("ns-scoring", r.every(Boolean), JSON.stringify({ r, method: method.problems, what: [what.problems, what.report.rate], noted: [noted.problems, noted.report.rate], bare: bare.report.rate, bareNoted: bareNoted.report.rate, old: [old.problems, old.report.rate] }));
+    }
+
+    // ns-migrate (D27): `--migrate --to 3` switches an open rubric-2 plan — rubric, profile, the risk placeholder, a
+    // components skeleton and the switch note are the only lines added or changed; the Baseline, the evidence, the
+    // amendments and the reviews file are byte-identical and the rate is the same; a closed plan is refused (its score
+    // is final); the output lists what the plan now owes; a plan not switched checks exactly as before
+    {
+      const ITEMS3 = `${ITEMS_V2}\n- [ ] D3 · **Retry** The writer retries once · test: retry.test.ts (fails when: the retry is absent)`;
+      const AM = "- A1 · 2026-09-14 · discovered · +D3 · layer: 7.2 · two writers lost an entry\n- A2 · 2026-09-15 · requested · ~D2 · layer: — · the owner asked for a CSV header\n";
+      const EVID = "- 2026-09-16 · D1 · pass · test: export.test.ts · abc1234 · claude\n- 2026-09-16 · D2 · fail · cmd: npm run lint → 2 errors · abc1234 · claude\n- 2026-09-17 · D2 · pass · cmd: npm run lint → 0 errors · abc1234 · claude\n";
+      const STEPS = "## Build plan\n1. Build the export · satisfies D1, D3\n2. Lint it · satisfies D2\n\n";
+      const REV = rv("F1 advisory · wording", { r: 2, missing: null });
+      const mp = (o = {}) => rp("mg", 2, { items: ITEMS3, baseline: ITEMS_V2, amend: AM, log: EVID, extra: STEPS, ...o, fm: { size: "S", ...(o.fm ?? {}) } });
+      const sectionOf = (t, h) => (t.replace(/\r\n/g, "\n").split(`\n## ${h}\n`)[1] ?? "\u0000none").split("\n## ")[0];
+      const logLines = (t) => sectionOf(t, "Log").split("\n").filter((l) => l.trim());
+      const fmOf = (t) => t.replace(/\r\n/g, "\n").split("\n---\n")[0];
+      const date = localDate();
+      const run = (text, args = [], files = {}) => {
+        const d = store({ "mg.md": text, "mg.reviews.md": REV, ...files });
+        const file = join(d, "mg.md"), before = readFileSync(file, "utf8"), snap0 = snapshot(d);
+        const c0 = checkIn(d).get("mg");
+        const r = cli(d, "--migrate", "--to", "3", "mg", ...args);
+        return { d, before, after: readFileSync(file, "utf8"), snap0, snap1: snapshot(d), c0, c1: checkIn(d).get("mg"), r, p1: checkIn(d).plan("mg") };
+      };
+      const kept = (x) => sectionOf(x.before, "Baseline") === sectionOf(x.after, "Baseline") && sectionOf(x.before, "Amendments") === sectionOf(x.after, "Amendments")
+        && sectionOf(x.before, "Definition of Done") === sectionOf(x.after, "Definition of Done")
+        && /* every Log line, evidence included, kept in order, the switch note appended */ JSON.stringify(logLines(x.after)) === JSON.stringify([...logLines(x.before), logLines(x.after).at(-1)])
+        && JSON.stringify(parsePlan(x.before, "a.md").evidence) === JSON.stringify(x.p1.evidence) && JSON.stringify(parsePlan(x.before, "a.md").amendments) === JSON.stringify(x.p1.amendments)
+        && JSON.stringify(parsePlan(x.before, "a.md").baseline) === JSON.stringify(x.p1.baseline);
+      const sameScore = (x) => x.c0.report.rate === x.c1.report.rate && JSON.stringify(x.c0.report) === JSON.stringify(x.c1.report);
+      const reviewsKept = (x) => JSON.parse(x.snap0)["mg.reviews.md"] === JSON.parse(x.snap1)["mg.reviews.md"];
+      // forward: an S plan (light, A8), its dry run first
+      const dry = run(mp(), ["--dry-run"]);
+      const fwd = run(mp());
+      const NOTE = `- ${date} · note · ${fmtN("migrateNote", { r: 1, a: 2, what: "a ## Components skeleton (C1, to split), profile: light, a risk: line to fill in" })}`;
+      const SKEL = `- C1 · **${SKELETON_TITLE}** ${SKELETON_STATEMENT} · D1 D2 D3`;
+      const expectedOf = (before) => before.replace("\nrubric: 2\n", `\nrubric: 3\nprofile: light\nrisk: ${RISK_TODO}\n`).replace(/(\n## Definition of Done\n[\s\S]*?\n)(## )/, `$1## Components\n${SKEL}\n\n$2`).replace(/\n$/, `\n${NOTE}\n`);
+      const expected = expectedOf(fwd.before);
+      const owes = (x) => x.c1.problems.map((p) => fmtN("migrateOwes", { slug: "mg", problem: p }));
+      const outLines = fwd.r.out.split("\n");
+      const shownChanges = ["rubric: 3", "profile: light", `risk: ${RISK_TODO}`, "## Components", SKEL, NOTE].map((l) => fmtR("change", { slug: "mg", line: l }));
+      // a full (L) plan gets profile full; a plan that already has components, a profile and a risk keeps them
+      // (an L plan at rubric 2 needs a work breakdown to pass --check, so its text change is checked directly)
+      // north-star A8: an M plan switches to full, like L
+      const midText = mp({ fm: { size: "M" } });
+      const midFull = migrateRubricText(midText, Object.assign(parsePlan(midText, "mg.md"), { reviews: [] })).text.includes("\nprofile: full\n");
+      const bigText = mp({ fm: { size: "L" } });
+      const bigOut = migrateRubricText(bigText, Object.assign(parsePlan(bigText, "mg.md"), { reviews: [] })).text;
+      const big = { before: bigText, after: bigOut, p1: parsePlan(bigOut, "mg.md"), c0: { report: reportNumbers(parsePlan(bigText, "mg.md")) }, c1: { report: reportNumbers(parsePlan(bigOut, "mg.md")) } };
+      const own = run(mp({ extra: `## Components\n- C1 · **The export** The CSV export works · D1 D2 D3\n\n${STEPS}`, fm: { profile: "full", risk: "an edge case found later is fixed as a defect" } }));
+      // CRLF: every line the switch writes ends CRLF too, and the kept sections are byte-identical
+      const crlf = run(mp().replace(/\n/g, "\r\n"));
+      // refusals: one stderr line, exit 1, the whole store unchanged
+      const refused = (text, line) => { const x = run(text); return x.r.code === 1 && x.r.out === "" && x.r.err === line && x.snap0 === x.snap1; };
+      const DONE = "- 2026-09-18 · status → done · close\n";
+      const final = ["done", "cancelled", "superseded"].map((s) => refused(mp({ fm: { status: s, closed: "2026-09-18" }, log: EVID + (s === "done" ? DONE : `- 2026-09-18 · status → ${s} · ${s === "cancelled" ? "cancel" : "supersede"}\n`) }), fmtN("migrateFinal", { slug: "mg", status: s, n: 2 })));
+      const already = refused(rp("mg", 3, {}), fmtN("migrateRubric3", { slug: "mg" }));
+      const one = refused(plan("mg", {}), fmtN("migrateRubric1", { slug: "mg" }));
+      const oneDone = refused(plan("mg", { fm: { status: "done", closed: "2026-09-18" } }), fmtN("migrateFinal", { slug: "mg", status: "done", n: 1 }));
+      const problems = refused(mp({ fm: { status: "bogus" } }), fmtR("checkProblems", { slug: "mg" }));
+      // history: reviews and amendments on record at the switch are judged as written; later ones by rubric 3
+      const REV3 = rv("F1 advisory · wording", { r: 3, missing: null });
+      const hist = (note, reviews = REV3) => chk("mg", 3, reviews, { items: ITEMS3, baseline: ITEMS_V2, amend: AM, log: EVID + note });
+      const NOTE11 = `- ${date} · note · ${fmtN("migrateNote", { r: 1, a: 2, what: "x" })}\n`;
+      const keptHist = hist(NOTE11), noNote = hist(""), later = hist(NOTE11, `${REV3}\n${rv("F1 advisory · wording", { r: 3, missing: null }).replace("## Review 1", "## Review 2")}`);
+      // not switched: a rubric-2 plan beside it, carrying every rubric-3 marker the switch writes, checks the same
+      const OTHER = rp("other", 2, { fm: { risk: RISK_TODO, profile: "light" }, extra: `## Components\n- C1 · **${SKELETON_TITLE}** x · D1 D2\n\n`, log: `- ${date} · note · ${fmtN("migrateNote", { r: 0, a: 0, what: "x" })}\n` });
+      const od = store({ "mg.md": mp(), "mg.reviews.md": REV, "other.md": OTHER, "other.reviews.md": REV });
+      const oBefore = cli(od, "--check", "other"), oProblems = checkIn(od).get("other").problems;
+      const oMig = cli(od, "--migrate", "--to", "3", "mg");
+      const oAfter = cli(od, "--check", "other");
+      const r = [
+        /* 0 */ dry.r.code === 0 && dry.snap0 === dry.snap1 && dry.r.out === fwd.r.out,
+        /* 1 */ fwd.r.code === 0 && fwd.after === expected,
+        /* 2 */ kept(fwd) && kept(big) && kept(own) && kept(crlf),
+        /* 3 */ sameScore(fwd) && sameScore(big) && sameScore(own) && sameScore(crlf) && fwd.c0.report.rate === 67,
+        /* 4 */ reviewsKept(fwd) && Object.keys(JSON.parse(fwd.snap1)).length === Object.keys(JSON.parse(fwd.snap0)).length,
+        /* 5 */ JSON.stringify(outLines) === JSON.stringify([...shownChanges, ...owes(fwd)]) && fwd.c1.problems.length > 0,
+        /* 6 */ [fmtN("riskTodo"), fmtN("componentTodo", { c: "C1" }), fmtN("stepNoComponent", { k: 1 }), fmtN("stepNoComponent", { k: 2 })].every((p) => fwd.c1.problems.includes(p)),
+        /* 7 */ midFull && fmOf(big.after).includes("\nprofile: full\n") && fmOf(own.after).includes("\nprofile: full\n") && !fmOf(own.after).includes("TODO") && own.after.split("## Components").length === 2 && own.r.out.includes(fmtN("migrateNote", { r: 1, a: 2, what: "nothing else — it already had components, a profile and a risk line" })),
+        /* 8 */ !crlf.after.replace(/\r\n/g, "").includes("\n") && crlf.after.replace(/\r\n/g, "\n") === expectedOf(crlf.before.replace(/\r\n/g, "\n")) && crlf.r.code === 0,
+        /* 9 */ final.every(Boolean) && already && one && oneDone && problems,
+        /* 10 */ SWITCH_NOTE_RE.test(fmtN("migrateNote", { r: 3, a: 12, what: "x" })) && fwd.p1.notes.some((x) => SWITCH_NOTE_RE.test(x.text)),
+        /* 11 */ !keptHist.problems.includes(fmtN("missingLine", { n: 1 })) && !keptHist.problems.includes(fmtN("changesMissing", { a: "A1" }))
+          && !keptHist.problems.includes(fmtN("freezePromise", { a: "A2" })) && noNote.problems.includes(fmtN("freezePromise", { a: "A2" }))
+          && noNote.problems.includes(fmtN("missingLine", { n: 1 })) && noNote.problems.includes(fmtN("changesMissing", { a: "A1" }))
+          && later.problems.includes(fmtN("missingLine", { n: 2 })) && !later.problems.includes(fmtN("missingLine", { n: 1 })),
+        /* 12 */ oMig.code === 0 && oBefore.out === oAfter.out && oBefore.code === oAfter.code && oProblems.length === 0,
+      ];
+      expect("ns-migrate", r.every(Boolean), JSON.stringify({ r, own: [own.r.code, own.r.err], refusals: [final, already, one, oneDone, problems], out: fwd.r.out, err: fwd.r.err, same: fwd.after === expected, after: fwd.after.slice(0, 900), c1: fwd.c1.problems, kept: [kept(fwd), kept(big), kept(own), kept(crlf)], rate: [fwd.c0.report.rate, fwd.c1.report.rate], keptHist: keptHist.problems, noNote: noNote.problems, later: later.problems, oProblems, oBefore: oBefore.out.slice(-300), oAfter: oAfter.out.slice(-300) }));
+    }
+    // ns-messages (D27 and steps 1–7): every rubric-3 text the script prints is in plan-template.md › Rubric 3
+    {
+      const tpl = readFileSync(join(dirname(SELF), "..", "references", "plan-template.md"), "utf8").replace(/\r\n/g, "\n");
+      const sec = (tpl.split("\n## Rubric 3 — what done is made of\n")[1] ?? "").split("\n## ")[0];
+      const missing = Object.values(MESSAGES_NS).filter((m) => !sec.includes(m));
+      expect("ns-messages", sec.length > 0 && missing.length === 0, JSON.stringify(missing));
+    }
+  }
+
   const passed = results.filter(([, ok]) => ok).length;
   const slowest = [...gaps].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, ms]) => `slowest: ${name} ${Math.round(ms)} ms`);
-  return { ok: passed === results.length, summary: `${passed}/${results.length} cases (${results.filter(([, ok]) => !ok).map(([n]) => n).join(", ") || "all pass"})`, details, slowest };
+  return { results, ok: passed === results.length, summary: `${passed}/${results.length} cases (${results.filter(([, ok]) => !ok).map(([n]) => n).join(", ") || "all pass"})`, details, slowest };
 }
 
 // ---------------------------------------------------------------- cli
@@ -5088,7 +6094,7 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
 function main(argv) {
   const args = argv.slice(2);
   const opt = (name) => { const k = args.indexOf(name); return k === -1 ? undefined : args[k + 1]; };
-  if (args.includes("--selftest")) return selftest({ timing: args.includes("--timing") });
+  if (args.includes("--selftest")) return selftest({ timing: args.includes("--timing"), only: opt("--case") });
   // --migrate: usage from the arguments alone, then the Node version, both before any file is read (D7 order)
   if (args.includes("--migrate")) {
     const m = parseMigrateArgs(args);
@@ -5144,7 +6150,7 @@ function main(argv) {
     // every printed line is plain text of at most 120 columns; plan text inside a message is sanitised first
     const printed = [];
     const say = (line, prefix = "") => { for (const l of wrapLine(plainText(line), 120, prefix)) { printed.push(l); console.log(l); } };
-    say(`${showSlug(slug)} · ${plan.fm.status} · verified ${c.verified}/${c.total}`);
+    say(`${showSlug(slug)} · ${plan.fm.status}${r.partial && r.waiting.length ? " · partial" : ""} · verified ${c.verified}/${c.total}`);
     say(`baseline ${r.baseline} · discovered ${r.discovered} amendment(s) / ${r.discoveredDesign} design change(s) (wrong ${r.wrong} · missed ${r.missedOps}) · corrected ${r.corrected} · requested ${r.requested} · emergent ${r.emergent} · defect ${r.defect} · external ${r.external}` + (r.rate == null ? "" : r.notStarted ? " · prediction rate n/a (not started)" : ` · prediction rate ${r.rate} %`) + (r.grew == null ? "" : ` · ${grewLine(r.grew)}`) + reworkPart(r), "  ");
     say(historyLine(plan, plans), "  ");
     say(checkSummary(plan, c, warns.length), "  ");

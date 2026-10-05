@@ -7,9 +7,10 @@ nightly job, checked `src/jobs/`"). The reviewer may contest any N/A.
 
 Probes marked **⛔ gating** block `ready` individually, even if the layer's other probes are answered.
 
-**Two rubrics.** rubric 1 = 45 probes and 7 gating. rubric 2 = 49 probes and 9 gating — it adds the four probes
-marked `(rubric 2)` below (4.5, 11.4, 12.4 ⛔, 14.4 ⛔). A plan's `rubric:` field says which one scores it
-(absent means 1); new plans are written at `rubric: 2`. The script holds the same numbers in its exported
+**Three rubrics.** rubric 1 = 45 probes and 7 gating. rubric 2 = 49 probes and 9 gating — it adds the four probes
+marked `(rubric 2)` below (4.5, 11.4, 12.4 ⛔, 14.4 ⛔). rubric 3 = 50 probes and 9 gating — it adds 11.5, the
+design bar, marked `(rubric 3)`, and changes what a review finding may block on (What blocks, below). A plan's
+`rubric:` field says which one scores it (absent means 1); new plans are written at `rubric: 3`. The script holds the same numbers in its exported
 `RUBRIC` constant, and `--selftest` case `rubric-sync` fails if this file and that constant disagree.
 
 Coverage is reported at both levels over **applicable** layers and probes: `14/14 layers · 42/42
@@ -79,7 +80,7 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 11.2 Feedback: progress, success, failure, and empty-result messaging in the product's voice.
 - 11.3 Accessibility (keyboard, screen reader, contrast) and small-screen behaviour.
 - 11.4 (rubric 2) Activation: how the feature is invoked or activated when nobody asks for it — a trigger, a pointer line, a hook, a schedule — and what shows it was; the should-not-activate cases are unrelated to the feature's purpose, never adjacent to it — an agent that has just finished an adjacent task invokes it for a good reason.
-
+- 11.5 (rubric 3) Design bar: the look and feel done requires, stated as a result, never as the code that produces it. A specific bar (a colour, a theme, a layout, a named component set) is answered by a check that fails without it; a qualitative bar (dynamic, flexible, calm, on-brand) by a manual item naming its judge (`judge: <who>`) and what they judge against. A surface with no bar says so in prose ("no design bar: internal tool, function only").
 ## 12. Failure handling & observability
 - 12.1 What the user sees for each failure class, and what they can do next.
 - 12.2 What is logged or measured, with enough context to debug without reproducing.
@@ -100,6 +101,24 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 ## 15. Out of scope
 - 15.1 What was explicitly considered and excluded, so a builder does not fill the gap by guessing.
 - 15.2 What is deferred to a later item, and the slug or issue it lives in.
+
+---
+
+## What blocks (rubric 3)
+
+A Definition of Done says what the finished product must accomplish, never how the code does it. Under rubric 3
+a review finding blocks `ready` only when the product would fail at one of four things, and it says which:
+
+- `blocks: outcome` — something the plan promises would not happen, or would happen wrongly;
+- `blocks: component` — a part the product cannot be complete without is missing;
+- `blocks: design` — the design bar (11.5) would not be met;
+- `blocks: limit` — a limit that defines done would be broken, such as "answers in under 3 seconds".
+
+Everything else is advice: how to code it, how to build a test rig, more tests, more detail on a decision the
+plan already makes. The gating probes above still decide whether a layer is Considered; they no longer make a
+finding blocking by naming them. A **light** plan (S, M or unattended, unless the owner asks for full) answers a
+probe its brief does not touch with `not in brief: <reason>`, gating probes included, and states the risk it
+accepts in a `risk:` line (plan-template.md › Rubric 3). Rubric-1 and rubric-2 plans keep their rules unchanged (review.md).
 
 ---
 

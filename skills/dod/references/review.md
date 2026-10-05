@@ -7,7 +7,7 @@
 | 1 | Coverage table complete: 15 canonical rows, no Gap, gate `passed`, `coverage_author` matches | script |
 | 2 | Every Considered layer 2–14 points at ≥ 1 D-item; every pointer names a real heading | script |
 | 3 | No `decision-required` assumption | script |
-| 4 | No gating probe unanswered — rubric 1: 2.1, 3.3, 4.4, 6.2, 10.1, 10.3, 14.3; rubric 2 adds 12.4 and 14.4 | you — it is inside a Considered row |
+| 4 | No gating probe unanswered — rubric 1: 2.1, 3.3, 4.4, 6.2, 10.1, 10.3, 14.3; rubrics 2 and 3 add 12.4 and 14.4 | you — it is inside a Considered row |
 | 5 | Every D-item verifiable by its evidence type by a stranger | reviewer |
 | 6 | Every Build-plan step cites the D-items it satisfies; no "as discussed" | reviewer |
 | 7 | A review in `<slug>.reviews.md` with `VERDICT: READY`, a coverage line, every finding dispositioned | script (presence) · you (substance) |
@@ -122,6 +122,32 @@ in as written. Write the file to the temporary folder under the same name form, 
 > both): `14/14 layers · 42/42 probes`. End with EXACTLY one line: `VERDICT: READY` if there are no
 > blocking findings, else `VERDICT: REVISE`.
 
+## Rubric 3 — what blocks (sent after the rubric, for a `rubric: 3` plan only)
+
+`--review-prompt` adds this block, verbatim, straight after the rubric when the plan says `rubric: 3`. A
+rubric-1 or rubric-2 plan's prompt is unchanged.
+
+> This plan is scored by rubric 3. Where the rubric above says which findings are `blocking`, this replaces it.
+>
+> - **Only what blocks.** A finding is `blocking` only when the finished product would fail at something
+>   the plan must deliver: an outcome it promises, a component it cannot be complete without, its design
+>   bar, or a limit that defines done (such as "answers in under 3 seconds"). Write which one on the
+>   finding's first line, `blocks: outcome`, `blocks: component`, `blocks: design` or `blocks: limit`, and
+>   say in one clause what would fail. How to code it, how to build a test rig, more tests, or more detail
+>   on a decision the plan already makes is `advisory`, whatever probe it names. The builder chooses the
+>   method; the plan says what done is.
+> - **One line per layer.** Before your findings, write one line for each of the 15 layers:
+>   `L<n> · Considered | Gap | N/A · <finding ids, or no finding>`. "No finding" is an answer.
+> - **Missing components.** Ask what the finished product cannot be complete without that the plan does not
+>   name (its `## Components` section, when it has one). Before your coverage line, write exactly one line:
+>   `missing components: none`, or `missing components: <a>; <b>`, naming each one.
+> - **What rubric 3 allows.** These forms are valid and are not findings by themselves: `host-check: <name> ·
+>   <command>` evidence (a check the project already ships); on a light plan, a probe answered
+>   `not in brief: <reason>` in Coverage (never a gating or layer-10 probe: that one is a finding);
+>   `S-<n> · assumed · risk · … · finding: Review <k> F<f>` (a risk the owner accepted); `advances C<n>` on Build plan steps; `changes:` on a `discovered` amendment.
+> - End with `VERDICT: READY` when no finding carries `blocks:` and no component is missing, else
+>   `VERDICT: REVISE`.
+
 ## Running Codex
 
 Verified 2026-09-14 with codex-cli 0.151.0 on Windows (Git Bash). Feed the prompt through **stdin** —
@@ -201,6 +227,20 @@ fill in, and put the review page's path — or its published link — in the sam
   is **not** concurrence — run the next round with the reclassified list in the "revised plan" preamble
   so the reviewer re-scores those probes explicitly. This is what stops a review loop that keeps asking for
   more without naming what is missing.
+- **Rubric 3: only what blocks.** A finding tagged `blocking` without a `blocks:` tag is dispositioned
+  `rejected · advisory by rule — names no outcome, component, design bar or limit` (or `accepted · advisory by
+  rule — <what you changed anyway>`); until it is, `--check` reports it. Each component the sweep names gets
+  its own line, numbered in the sweep's order: `- M1 · accepted · <change>` or `- M1 · rejected · <reason>`. A
+  review without the `missing components:` line is a `--check` problem. A REVISE whose findings are then all
+  advisory, and whose missing components were all rejected, **stands as READY**: the plan may be approved on
+  it, and the next review starts a new run.
+- **Rubric 3: rounds, then freeze.** A light plan gets 2 `codex` or `subagent` rounds per run, a full plan 3.
+  After them, approve with `review: <reviewer> · frozen` on the latest REVISE, no owner note needed, once every
+  finding of that review carrying `blocks:` is an `- S-<n> · assumed · risk · … · finding: Review <k> F<f>`
+  assumption the owner can read (plan-template.md › Rubric 3). A finding that `blocks: outcome` is never
+  frozen, and a plan made `--autonomous` also needs `- YYYY-MM-DD · note · accept · Review <k> F<f> · <who>` from
+  the owner or the delegate for each frozen risk — the agent never writes that line. Advice on a READY review goes to the Log as
+  `note · deferred · Review <k> F<f> · …`; an amendment citing it is a `--check` problem.
 - **Concurrence** = `VERDICT: READY` on the plan as it stands now: all `blocking` findings accepted and
   applied, every `advisory` finding dispositioned. Between the READY and `approve`, any edit to a D-item,
   a Coverage row, or an assumption invalidates the READY — review again; the script cannot see that
