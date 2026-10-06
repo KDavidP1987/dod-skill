@@ -154,8 +154,13 @@ dod can post a short public report when a plan closes, so the skill's own layer 
 projects say they should. Nothing is ever sent without an answer to this question, and the answer is off
 until the user changes it. Ask it once per store — at `setup`, or at the first interactive `plan` in a
 store that has no entry — and only when `node <skill>/scripts/dod-feedback.mjs --needs-question --dir
-<store>` exits 0. **`--autonomous` never asks and never writes consent.** Ask this text, at the reader's
-level (audience.md), one line per option, no table:
+<store>` exits 0. **`--autonomous` never asks and never writes consent.**
+
+**Show a real sample first.** Run `node <skill>/scripts/dod-feedback.mjs --sample --dir <store>` and show the
+user its output verbatim before you ask: it is what a report from this store would carry, built from the newest
+closed plan whose report carries reasons — or an example labelled `example — not from your plans` when there is
+none. It needs no consent, sends nothing and writes nothing. Then ask this text, at the reader's level
+(audience.md), one line per option, no table:
 
 ```
 May dod send a short public report when a plan closes?
@@ -179,20 +184,36 @@ Your answer:
   auto     it is sent at every close without asking
 And, unless off, how much to say:
   numbers  the counts only
-  reasons  the counts plus one short line per missed item, saying what the plan missed
+  reasons  the counts plus one short line per missed item, in the plan's own words, with these
+           taken out first: reasons lines lose code names, identifiers, tracker ids and security
+           details — anything in backticks, names such as customer_email, getUserRole or
+           api.users, ids such as ABC-12, and every reason filed under permissions or security
+           or holding a word such as password, token, key, e-mail, admin or role. Everything
+           else in the line is sent as written; the sample above shows exactly what that looks like.
+From a private repository only the numbers are sent, unless its owner chooses reasons for it.
 ```
+
+**Reasons from a private repository.** When the user answers `reasons` and the sample says the repository is
+private, ask one more question: *"This repository is private. Should the reasons lines be sent from it too? No
+is the default."* Pass `--private-reasons` only after the user's explicit yes to the private-repository
+question, never under `--autonomous` and never on your own judgement. Any later `--set-consent` without the flag
+takes the choice back. A repository whose visibility `gh` cannot read (no `gh`, no remote, offline) always
+sends numbers, choice or not.
 
 Write the answer with the script, never by hand:
 
 ```bash
-node <skill>/scripts/dod-feedback.mjs --set-consent off|review|auto [--detail numbers|reasons] --dir <store>
+node <skill>/scripts/dod-feedback.mjs --sample --dir <store>     # what a report would carry, before the question
+node <skill>/scripts/dod-feedback.mjs --set-consent off|review|auto [--detail numbers|reasons] [--private-reasons] --dir <store>
 node <skill>/scripts/dod-feedback.mjs --profile --dir <store>    # what this store's answer is now
 ```
 
 `--set-consent` rewrites only this store's entry — every other store in the record survives a round trip
 byte for byte — creates `~/.dod/` and the file when they are missing, and refuses to overwrite a record
 that is not valid JSON. The record's shape is
-`{"version":1,"stores":{"<store path>":{"consent":"off|review|auto","detail":"numbers|reasons","asked":"YYYY-MM-DD"}}}`.
+`{"version":1,"stores":{"<store path>":{"consent":"off|review|auto","detail":"numbers|reasons","asked":"YYYY-MM-DD"}}}`,
+plus `"private_reasons":true` only when the user chose reasons from a private repository; anything but the JSON
+boolean `true` there reads as not chosen, with one warning.
 No consent lives in `profile.md`: a `## Feedback` section there (from an unreleased draft) is ignored.
 
 **The GitHub credential is gh's, never dod's.** dod reads no token and stores none; `gh` holds it in its

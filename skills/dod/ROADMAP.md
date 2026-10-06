@@ -6,6 +6,10 @@ the [README](README.md#roadmap).
 
 ## Shipped
 
+- **0.3.4 — private feedback stays private.** A privacy fix from a field report: the opt-in feedback that
+  explains a plan's misses in words (`detail: reasons`) loses code names, identifiers, tracker ids and the text
+  of any permissions or security answer; a private repository sends numbers only unless you choose otherwise;
+  and the consent question shows a real draft from your own plans first.
 - **0.3.3 — plans sized to the work.** Built from field reports where dod cost more than the app it planned. A
   definition of done says what the finished product must accomplish, never how the code does it:
   - a review finding blocks only when an outcome, a needed part, the design bar or a completion limit would
@@ -27,11 +31,11 @@ the [README](README.md#roadmap).
   opt-in feedback loop.
 - **0.1 — the first release.** Fifteen layers, independent review, the frozen baseline, the prediction rate.
 
-## 0.3.4
+## 0.3.5
 
-- `probe-fixes` — planning checks learned from field reports: a plan's parts that must add up to the whole, a
-  reconciliation item that proves they do, look-alike items that should be one, and a list of field probes
-  seeded from the reports so far.
+- `probe-fixes` — planning checks learned from eighteen field reports: a plan's parts that must add up to the
+  whole, a reconciliation item that proves they do, look-alike items that should be one, a list of the questions
+  plans miss most, and a gap that names the exact question it missed.
 
 ## 0.4.0
 

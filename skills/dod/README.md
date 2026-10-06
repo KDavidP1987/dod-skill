@@ -5,7 +5,7 @@
 
 **Plan the whole feature before your AI agent builds it — then see how much of the work the plan foresaw.**
 
-Version 0.3.3 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Roadmap](ROADMAP.md) · [Walkthrough of a real plan](../../docs/dod-walkthrough.md)
+Version 0.3.4 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Roadmap](ROADMAP.md) · [Walkthrough of a real plan](../../docs/dod-walkthrough.md)
 
 <img src="assets/plan-page.png" alt="A plan page written by dod: the pm-views plan, done, 42 of 42 items verified, prediction rate 88 %, with its predicted-against-observed chart" width="100%">
 
@@ -357,18 +357,17 @@ The pages are drawn by `scripts/dod-pages.mjs`; every string from a plan is esca
 
 `scripts/dod-effort.mjs` measures a work package's active time and tokens from the session records' times and
 counts only. `scripts/dod-feedback.mjs` is the opt-in feedback loop: with consent (kept in your home folder,
-never in a repository) `close` can post a closed plan's numbers — no free text but a scrubbed amendment reason —
-as one issue on this skill's repository. Off is the default: nothing is sent, asked or written without consent.
+never in a repository) `close` can post a closed plan's numbers — no free text but an amendment reason with code names, identifiers, tracker ids
+and security details taken out, and from a private repository only if you choose it — as one issue on this skill's repository. Off is the default: nothing is sent, asked or written without consent.
 
 </details>
 
 ## Roadmap <!-- required -->
 
-- **Now — 0.3.3:** plans sized to the work. A plan says what done looks
-  like (outcomes, the parts the product needs, a design bar, limits such as "under 3 seconds"), never how to
-  code it. Small plans get a light profile, review stops after two or three rounds, and the plan stops growing
-  once the build starts.
-- **Then — 0.3.4:** planning checks learned from field reports — parts that must add up to the whole, and look-alike items.
+- **Now — 0.3.4:** a privacy fix for the opt-in feedback. Reasons lines lose code names, identifiers,
+  tracker ids and security details; a private repository sends numbers only unless you choose otherwise; and
+  the consent question shows a real draft from your own plans first.
+- **Then — 0.3.5:** planning checks learned from eighteen field reports — parts that must add up to the whole, and look-alike items.
 - **0.4.0:** a second reviewer from another model family, scoring that sorts a reversal by its cause, hook
   reminders, and the `audit` and `enhance` commands.
 - **1.0 — under consideration:** after 0.4.0, once dod has been used on outside projects with a prediction rate

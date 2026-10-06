@@ -12,14 +12,15 @@
 //
 //   node dod-feedback.mjs --draft <slug>            print what would be sent, with its draft id
 //   node dod-feedback.mjs --send <slug> [--yes] [--again] [--draft-id <id>]
+//   node dod-feedback.mjs --sample                  what a report from this store would carry, before anyone consents
 //   node dod-feedback.mjs --profile                 this store's consent, detail and asked date
-//   node dod-feedback.mjs --set-consent off|review|auto [--detail numbers|reasons]
+//   node dod-feedback.mjs --set-consent off|review|auto [--detail numbers|reasons] [--private-reasons]
 //   node dod-feedback.mjs --needs-question          exit 0 when this store has never been asked
-//   node dod-feedback.mjs --selftest [--assert-timing]
+//   node dod-feedback.mjs --selftest [--assert-timing] [--case <name>]
 //
-// Plan: docs/dod/feedback-loop.md (D1–D17).
+// Plan: docs/dod/feedback-loop.md (D1–D17); the reasons scrub, visibility and the send guard: docs/dod/feedback-privacy.md.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync, chmodSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync, chmodSync, realpathSync, statSync, openSync, writeSync, closeSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir, platform } from "node:os";
@@ -46,8 +47,8 @@ const DETAILS = ["numbers", "reasons"];
 const REVIEWERS = ["codex", "subagent", "human"];
 
 export const USAGE =
-  "usage: dod-feedback.mjs --draft <slug> | --send <slug> [--yes] [--again] [--draft-id <id>] | --profile | " +
-  "--set-consent <c> [--detail <d>] | --needs-question | --selftest [--dir <store>]";
+  "usage: dod-feedback.mjs --draft <slug> | --send <slug> [--yes] [--again] [--draft-id <id>] | --sample | --profile | " +
+  "--set-consent <c> [--detail <d>] [--private-reasons] | --needs-question | --selftest [--case <name>] [--dir <store>]";
 
 export const issuesUrl = () => `https://github.com/${REPO}/issues`;
 export const newIssueUrl = () => `${issuesUrl()}/new`;
@@ -101,7 +102,51 @@ export function readConsent(recordText, key) {
     if (typeof entry.asked === "string" && /^\d{4}-\d{2}-\d{2}$/.test(entry.asked)) out.asked = entry.asked;
     else out.warnings.push(`feedback: asked "${quoted(entry.asked)}" is not a date — treated as never`);
   }
+  // feedback-privacy D6: reasons from a private repository only on the exact JSON boolean true; the property is set
+  // only then, so a record without the choice reads exactly as it did before the field existed
+  if (entry.private_reasons !== undefined) {
+    if (entry.private_reasons === true) out.privateReasons = true;
+    else if (entry.private_reasons !== false) out.warnings.push(`feedback: private_reasons "${quoted(entry.private_reasons)}" is not true or false — treated as not chosen`);
+  }
   return out;
+}
+
+// ---------------------------------------------------------------- visibility (feedback-privacy D5, D6)
+
+// Read at every draft, sample and send, never cached (4.3). Anything short of a clear answer from gh is "unknown",
+// which counts as private. gh's output is read for one boolean and never printed or kept.
+export const VISIBILITY_TIMEOUT_MS = 10000;
+export function readVisibility(storeDir, { gh = "gh", git = "git", timeoutMs = VISIBILITY_TIMEOUT_MS } = {}) {
+  const run = (cmd, args) => spawnSync(cmd, args, { cwd: storeDir, encoding: "utf8", shell: false, timeout: timeoutMs, maxBuffer: GH_CAP, windowsHide: true });
+  const r = run(git, ["remote"]);
+  if (r.error) return { state: "unknown", cause: r.error.code === "ENOENT" ? "git is not installed" : "git could not be run" };
+  if (r.status !== 0) return { state: "unknown", cause: "not a git repository" };
+  if (!String(r.stdout).trim()) return { state: "unknown", cause: "no remote" };
+  const [cmd, ...prefix] = Array.isArray(gh) ? gh : [gh];
+  const v = run(cmd, [...prefix, "repo", "view", "--json", "isPrivate"]);
+  if (v.error) {
+    if (v.error.code === "ENOENT") return { state: "unknown", cause: "gh is not installed" };
+    if (v.error.code === "ETIMEDOUT") return { state: "unknown", cause: `no answer from gh in ${Number((timeoutMs / 1000).toFixed(1))} s` };
+    return { state: "unknown", cause: "gh could not be run" };
+  }
+  if (v.status !== 0) return { state: "unknown", cause: "gh could not read it — offline or not signed in" };
+  let data = null;
+  try { data = JSON.parse(v.stdout); } catch { /* below */ }
+  if (data && data.isPrivate === true) return { state: "private" };
+  if (data && data.isPrivate === false) return { state: "public" };
+  return { state: "unknown", cause: "gh gave no answer it could read" };
+}
+
+// What a draft or send carries: reasons only when consented and the repository is public, or private with the user's
+// own recorded choice. The why-line goes to the terminal and never into the body.
+export function effectiveDetail(detail, { visibility, privateReasons = false, consent = "review" } = {}) {
+  if (detail !== "reasons") return { detail: "numbers", why: null };
+  if (visibility?.state === "public") return { detail: "reasons", why: null };
+  if (visibility?.state === "private" && privateReasons === true) return { detail: "reasons", why: null };
+  if (visibility?.state === "private") {
+    return { detail: "numbers", why: `feedback: this repository is private — reasons left out, numbers only; to send reasons from it, run --set-consent ${consent} --detail reasons --private-reasons` };
+  }
+  return { detail: "numbers", why: `feedback: this repository's visibility could not be read (${visibility?.cause ?? "unknown"}) — treated as private: reasons left out, numbers only` };
 }
 
 // ---------------------------------------------------------------- the scrub (D6)
@@ -110,6 +155,9 @@ export function readConsent(recordText, key) {
 // a URL rather than half-eaten as a path. The list is exported so the selftest can disable one rule at a time and
 // prove that each is the reason its case passes.
 export const SCRUB_RULES = [
+  // feedback-privacy D1: a code span goes whole — a run of backticks to the next run of the same length, then any
+  // backtick left unmatched on its own — first, so nothing inside it is half-eaten by a later rule
+  { name: "backticks", apply: (s) => s.replace(/(`+)[^]*?(?<!`)\1(?!`)/g, "[removed]").replace(/`/g, "") },
   { name: "urls", apply: (s) => s.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[removed]").replace(/\bwww\.\S+/gi, "[removed]") },
   { name: "emails", apply: (s) => s.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[removed]") },
   { name: "windows-paths", apply: (s) => s.replace(/\\\\[^\s]+/g, "[removed]").replace(/\b[A-Za-z]:[\\/][^\s]*/g, "[removed]") },
@@ -117,8 +165,23 @@ export const SCRUB_RULES = [
   { name: "relative-paths", apply: (s) => s.replace(/(?<![\w.])\.\.?\/\S+/g, "[removed]").replace(/(?<![\w./])[\w.-]+\/[\w.\-/]+/g, "[removed]") },
   { name: "shas", apply: (s) => s.replace(/(?<![\w])[0-9a-f]{7,40}(?![\w])/g, "[removed]") },
   { name: "secrets", apply: (s) => s.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, "[removed]").replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[removed]").replace(/\bAKIA[0-9A-Z]{8,}/g, "[removed]") },
+  // feedback-privacy D25: snake_case, camelCase and dotted names; an abbreviation of single letters (e.g., i.e.) stays
+  { name: "identifiers", apply: (s) => s
+    .replace(/\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b/g, "[removed]")
+    .replace(/\b[a-z]+(?:[A-Z][a-z0-9]+)+\b/g, "[removed]")
+    .replace(/(?<![\w.])[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+/g, (m) => (m.split(".").every((p) => p.length === 1) ? m : "[removed]")) },
+  // feedback-privacy D2: tracker ids in any case — dod's own S-10 and UTF-16 included, on purpose (4.4)
+  { name: "trackers", apply: (s) => s.replace(/\b[A-Za-z][A-Za-z0-9]*-\d+\b/g, "[removed]") },
   { name: "needles", apply: (s, needles) => { for (const n of needles) if (n && n.length >= 4) s = s.split(new RegExp(escapeRe(n), "gi")).join("[removed]"); return s; } },
   { name: "at-signs", apply: (s) => s.replace(/@/g, "(at)") }, // no GitHub user is ever mentioned by a report
+];
+
+// feedback-privacy D3, D24: a reason that is withheld keeps its probe and loses every word. The first rule that
+// matches names the line. The list is exported so the selftest can disable one rule and watch the reason leak.
+const SENSITIVE_WORDS = /\b(?:passwords?|secrets?|tokens?|credentials?|keys?|e-?mails?|personal\s+data|piis?|admins?|roles?|permissions?|ssns?)\b/i;
+export const WITHHOLD_RULES = [
+  { name: "security-layers", label: "permissions or security", test: (a) => /^(?:2|10)(?:\.\d{1,2})?$/.test(String(a.layer ?? "")) },
+  { name: "sensitive-words", label: "sensitive word", test: (a) => SENSITIVE_WORDS.test(String(a.why ?? "")) },
 ];
 
 const escapeRe = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -134,13 +197,32 @@ export function scrub(text, needles = [], rules = SCRUB_RULES) {
 // and the two folder names that identify the machine and its owner.
 export function scrubNeedles(plan, slugs, cwd, home) {
   const words = String(plan.fm.title ?? "").split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 4);
-  return [...new Set([plan.slug, ...words, ...slugs, basename(cwd), basename(home)].filter(Boolean))];
+  return [...new Set([plan.slug, ...words, ...slugs, basename(cwd), repoFolderName(cwd), basename(home)].filter(Boolean))];
+}
+
+// feedback-privacy D10: the folder that names the project is the repository's top-level folder, not the folder a
+// send runs from — run from the store (`dod`), that name is in every report's fixed text and refused every send.
+// A name shorter than 4 characters, or one that is a word of the fixed text, can never be told from the report itself.
+const FIXED_TEXT = "dod feedback prediction success below target not measured none version size kind feature rate result waiting on the owner counted " +
+  "baseline items discovered design changes requested defect external missed probes review rounds reviewer pending other codex subagent human " +
+  "coverage author layers why the plan missed withheld permissions or security sensitive word details omitted for a report and more unknown no layer";
+const FIXED_WORDS = new Set(FIXED_TEXT.split(" "));
+export function repoFolderName(cwd) {
+  let d = resolve(cwd);
+  for (;;) {
+    if (existsSync(join(d, ".git"))) break;
+    const up = dirname(d);
+    if (up === d) { d = resolve(cwd); break; } // not in a repository: the folder it runs from
+    d = up;
+  }
+  const name = basename(d);
+  return name.length >= 4 && !FIXED_WORDS.has(name.toLowerCase()) ? name : null;
 }
 
 // The final check runs over the finished title and body: the scrub works on what it recognises, this works on what
 // must not appear whatever form it took. Keys are what the refusal line names.
 export function leakNeedles(slugs, cwd, home) {
-  const needles = { "the working directory": cwd, "your home directory": home, "the repository folder name": basename(cwd) };
+  const needles = { "the working directory": cwd, "your home directory": home, "the repository folder name": repoFolderName(cwd) };
   for (const s of slugs) needles[`the slug ${s}`] = s;
   return needles;
 }
@@ -159,7 +241,7 @@ export function skillVersion(skillMd = join(dirname(SELF), "..", "SKILL.md")) {
 
 // The body is a fixed list of key: value lines — no free text unless the user asked for reasons, and none at all
 // in a success report, which stops after `result`. Nothing here is taken from the plan except numbers and enums.
-export function buildReport(plan, reviews, { version = "unknown", detail = "numbers", needles = [], reviewsUnreadable = false, numbers = null } = {}) {
+export function buildReport(plan, reviews, { version = "unknown", detail = "numbers", needles = [], reviewsUnreadable = false, numbers = null, scrubRules = SCRUB_RULES, withholdRules = WITHHOLD_RULES } = {}) {
   const n = numbers ?? reportNumbers(plan);
   // north-star A2: a partial close scores the verified items only; the items waiting on the owner are named by count
   const base = /* ns-mutant:feedback-scored */n.scored ?? n.baseline, disc = n.discoveredDesign;
@@ -204,7 +286,10 @@ export function buildReport(plan, reviews, { version = "unknown", detail = "numb
       body.push("", "## Why the plan missed");
       for (const a of discovered.slice(0, MAX_REASONS)) {
         const layer = /^\d{1,2}(\.\d{1,2})?$/.test(a.layer) ? a.layer : "no layer";
-        body.push(`- ${layer} · ${scrub(a.why, needles).replace(/\s+/g, " ").trim().slice(0, MAX_REASON)}`);
+        const held = withholdRules.find((r) => r.test(a));
+        if (held) { body.push(`- ${layer} · withheld (${held.label})`); continue; }
+        // the scrub runs before the cut, so a span the cut would halve is still removed whole (D1)
+        body.push(`- ${layer} · ${scrub(a.why, needles, scrubRules).replace(/\s+/g, " ").trim().slice(0, MAX_REASON)}`);
       }
       if (discovered.length > MAX_REASONS) body.push(`- … and ${discovered.length - MAX_REASONS} more`);
     }
@@ -289,14 +374,72 @@ export function draft(slug, opts = {}) {
   const out = (l) => lines.push(l);
   const p = prepare(slug, { ...opts, out });
   if (p.error) return { lines, error: p.error, code: p.code };
-  const detail = opts.detail ?? "numbers";
+  // feedback-privacy D5: reasons only where the repository's visibility allows them; numbers need no read
+  const asked = opts.detail ?? "numbers";
+  const visibility = asked === "reasons" ? (opts.visibility ?? readVisibility(p.store, { gh: opts.gh, timeoutMs: opts.visibilityTimeoutMs })) : null;
+  const { detail, why } = effectiveDetail(asked, { visibility, privateReasons: opts.privateReasons === true, consent: opts.consent });
   const report = buildReport(p.plan, p.reviews, {
     version: skillVersion(), detail, reviewsUnreadable: p.reviewsUnreadable,
     needles: scrubNeedles(p.plan, p.slugs, p.cwd, p.home),
   });
-  // exactly: title, empty line, body, empty line, draft id — so the body is everything between the two empty lines
+  // exactly: title, empty line, body, empty line, draft id — so the body is everything between the two empty lines;
+  // a why-line (D5) comes after the id, outside the body
   out(report.title); out(""); out(report.body); out(""); out(`draft id: ${draftId(report.title, report.body)}`);
+  if (why) out(why);
   return { lines, report, code: 0 };
+}
+
+// ---------------------------------------------------------------- sample (feedback-privacy D7)
+
+// What a report from this store would carry, shown before the consent question: the numbers and the reasons draft of
+// the newest closed plan whose report carries reasons lines — built by draft(), so it is exactly what a send would
+// carry for this repository's visibility. Where that falls back to numbers, the reasons a send would carry if the
+// user chose them follow under PREVIEW. It needs no consent, sends nothing and writes nothing.
+export const PREVIEW = "preview only — this private repository sends numbers unless you choose reasons for it";
+export const EXAMPLE = "example — not from your plans";
+export function sample(opts = {}) {
+  const lines = [];
+  const out = (l) => lines.push(l);
+  const store = resolveStore(opts.dir);
+  const home = opts.home ?? homeDir();
+  let text = null;
+  if (existsSync(recordPath(home))) { try { text = readFileSync(recordPath(home), "utf8"); } catch { text = null; } }
+  const c = readConsent(text, storeKey(store));
+  const found = [];
+  for (const slug of storeSlugs(store)) {
+    let plan;
+    try { plan = parsePlan(readFileSync(join(store, `${slug}.md`), "utf8"), join(store, `${slug}.md`)); } catch { continue; }
+    if (plan.fm.status !== "done" || !plan.amendments.some((a) => a.kind === "discovered")) continue;
+    if (buildReport(plan, []).result === "success") continue; // a success report stops before any reason (A1)
+    found.push({ slug, closed: String(plan.fm.closed ?? "") });
+  }
+  found.sort((a, b) => b.closed.localeCompare(a.closed) || a.slug.localeCompare(b.slug));
+  if (!found.length) {
+    out(EXAMPLE);
+    const ex = parsePlan(planText({ slug: "example", title: "an example", items: 6, extra: [7, 8, 9], amendments: [
+      "- A1 · 2026-09-05 · discovered · +D7 · layer: 7.2 · two people editing the same record at once was not planned for",
+      "- A2 · 2026-09-06 · discovered · +D8 · layer: 12.1 · the message a user sees when an upload fails was never designed",
+      "- A3 · 2026-09-07 · discovered · +D9 · layer: 10.1 · an account of an access gap, which no report ever carries",
+    ] }), "example.md");
+    const r = buildReport(ex, [], { version: skillVersion(), detail: "reasons" });
+    out(r.title); out(""); out(r.body);
+    return { lines, code: 0 };
+  }
+  const slug = found[0].slug;
+  const visibility = opts.visibility ?? readVisibility(store, { gh: opts.gh, timeoutMs: opts.visibilityTimeoutMs });
+  const base = { dir: store, home, gh: opts.gh, visibility };
+  const consent = c.consent === "off" ? "review" : c.consent;
+  out(`sample — built from ${slug}, the newest closed plan whose report carries reasons; nothing is sent`);
+  out(""); out("numbers:");
+  for (const l of draft(slug, { ...base, detail: "numbers" }).lines) out(l);
+  out(""); out("reasons:");
+  const asked = draft(slug, { ...base, detail: "reasons", privateReasons: c.privateReasons === true, consent });
+  for (const l of asked.lines) out(l);
+  if (asked.report && !asked.report.body.includes("## Why the plan missed")) {
+    out(""); out(PREVIEW);
+    for (const l of draft(slug, { ...base, detail: "reasons", visibility: { state: "public" } }).lines) out(l);
+  }
+  return { lines, code: 0 };
 }
 
 // ---------------------------------------------------------------- send (D1, D2, D3, D7, D8, D16, D17)
@@ -341,70 +484,112 @@ export async function send(slug, opts = {}) {
   for (const w of consent.warnings) out(w);
   if (consent.consent === "off") { out("feedback: consent is off — nothing sent"); return { lines, code: 0 }; }
 
-  const p = prepare(slug, { dir, home: homeNow, hooks, out });
-  if (p.error) { out(p.error); return { lines, code: p.code }; }
+  const head = prepare(slug, { dir, home: homeNow, hooks, out: () => {} });
+  if (head.error) { out(head.error); return { lines, code: head.code }; }
 
-  // a plan that already carries a feedback note is not sent again by accident: one close, one report
-  if (!again && p.plan.notes.some((n) => /^feedback (sent|link printed) · /.test(n.text))) {
-    out(`feedback: ${slug} already has feedback — pass --again to send another`);
-    return { lines, code: 1 };
-  }
+  // feedback-privacy D23: one send of a plan at a time. The plan is read again under the guard, so a send that
+  // finished a moment ago is seen by its Log note below.
+  const guard = takeGuard(opts.lockDir ?? tmpdir(), head.plan, slug, out);
+  if (guard.refused) { out(guard.refused); return { lines, code: 1 }; }
+  try {
+    const p = prepare(slug, { dir, home: homeNow, hooks, out });
+    if (p.error) { out(p.error); return { lines, code: p.code }; }
 
-  let report = buildReport(p.plan, p.reviews, {
-    version: skillVersion(), detail: consent.detail, reviewsUnreadable: p.reviewsUnreadable,
-    needles: scrubNeedles(p.plan, p.slugs, p.cwd, p.home),
-  });
-  if (hooks.afterReport) report = hooks.afterReport(report); // selftest only: plant a needle the scrub cannot see
-  const id = draftId(report.title, report.body);
+    // a plan that already carries a feedback note is not sent again by accident: one close, one report
+    if (!again && p.plan.notes.some((n) => /^feedback (sent|link printed) · /.test(n.text))) {
+      out(`feedback: ${slug} already has feedback — pass --again to send another`);
+      return { lines, code: 1 };
+    }
 
-  if (consent.consent === "review" && !yes) {
-    out("feedback: review mode — show the user the draft (--draft) and send with --yes --draft-id <id> only after they agree");
-    return { lines, code: 1 };
-  }
-  if (consent.consent === "review" && yes && !draftIdGiven) {
-    out("feedback: review mode — show the user the draft (--draft) and send with --yes --draft-id <id> only after they agree");
-    return { lines, code: 1 };
-  }
-  if (draftIdGiven && draftIdGiven !== id) {
-    out("feedback: the report changed since the draft was shown — show the user the new draft");
-    return { lines, code: 1 };
-  }
+    // feedback-privacy D5, D6: the same visibility rule as --draft, so the approved draft id still matches here
+    const visibility = consent.detail === "reasons" ? (opts.visibility ?? readVisibility(p.store, { gh, timeoutMs: opts.visibilityTimeoutMs })) : null;
+    const { detail, why } = effectiveDetail(consent.detail, { visibility, privateReasons: consent.privateReasons === true, consent: consent.consent });
+    if (why) out(why);
+    let report = buildReport(p.plan, p.reviews, {
+      version: skillVersion(), detail, reviewsUnreadable: p.reviewsUnreadable,
+      needles: scrubNeedles(p.plan, p.slugs, p.cwd, p.home),
+    });
+    if (hooks.afterReport) report = hooks.afterReport(report); // selftest only: plant a needle the scrub cannot see
+    const id = draftId(report.title, report.body);
 
-  const leaked = scanForLeaks(`${report.title}\n${report.body}`, leakNeedles(p.slugs, p.cwd, p.home));
-  if (leaked.length) { out(`feedback: the report still contains ${leaked.join(", ")} — not sent`); return { lines, code: 1 }; }
+    if (consent.consent === "review" && !yes) {
+      out("feedback: review mode — show the user the draft (--draft) and send with --yes --draft-id <id> only after they agree");
+      return { lines, code: 1 };
+    }
+    if (consent.consent === "review" && yes && !draftIdGiven) {
+      out("feedback: review mode — show the user the draft (--draft) and send with --yes --draft-id <id> only after they agree");
+      return { lines, code: 1 };
+    }
+    if (draftIdGiven && draftIdGiven !== id) {
+      out("feedback: the report changed since the draft was shown — show the user the new draft");
+      return { lines, code: 1 };
+    }
 
-  // consent is read again here, as late as possible: an answer withdrawn while the report was built still counts
-  if (hooks.beforeSpawn) hooks.beforeSpawn();
-  const second = readRecord();
-  if (second.failed) { out(`feedback: cannot read the consent record (${second.failed}) — nothing sent`); return { lines, code: 1 }; }
-  const again2 = readConsent(second.text, storeKey(resolveStore(dir)));
-  if (again2.consent !== consent.consent || !["review", "auto"].includes(again2.consent)) {
-    out("feedback: consent changed during the send — nothing sent");
-    return { lines, code: 1 };
-  }
+    const leaked = scanForLeaks(`${report.title}\n${report.body}`, leakNeedles(p.slugs, p.cwd, p.home));
+    if (leaked.length) { out(`feedback: the report still contains ${leaked.join(", ")} — not sent`); return { lines, code: 1 }; }
 
-  out(`feedback: sending to ${REPO} with gh (up to ${Math.round(timeoutMs / 1000)} s)…`);
-  const res = await runGh(gh, ["issue", "create", "--repo", REPO, "--title", report.title, "--label", LABEL, "--body-file", "-"], report.body, timeoutMs);
+    // consent is read again here, as late as possible: an answer withdrawn while the report was built still counts
+    if (hooks.beforeSpawn) hooks.beforeSpawn();
+    const second = readRecord();
+    if (second.failed) { out(`feedback: cannot read the consent record (${second.failed}) — nothing sent`); return { lines, code: 1 }; }
+    const again2 = readConsent(second.text, storeKey(resolveStore(dir)));
+    if (again2.consent !== consent.consent || !["review", "auto"].includes(again2.consent)) {
+      out("feedback: consent changed during the send — nothing sent");
+      return { lines, code: 1 };
+    }
 
-  let note, outcome, code = 0;
-  if (res.ok && res.url) { out(`feedback: sent — ${res.url}`); note = `feedback sent · ${res.url}`; outcome = `sent as ${res.url}`; }
-  else if (res.ok) {
-    out(`feedback: gh reported success but printed no issue URL — check ${issuesUrl()}?q=label%3A${LABEL}`);
-    note = "feedback sent · no URL returned"; outcome = "sent without a returned URL";
-  } else {
-    out(`feedback: could not send with gh (${res.klass}) — open this link to post it yourself:`);
-    out(fallbackUrl(report.title, report.body));
-    note = `feedback link printed · ${res.klass}`; outcome = "printed the link";
-  }
+    out(`feedback: sending to ${REPO} with gh (up to ${Math.round(timeoutMs / 1000)} s)…`);
+    const res = await runGh(gh, ["issue", "create", "--repo", REPO, "--title", report.title, "--label", LABEL, "--body-file", "-"], report.body, timeoutMs);
 
-  const line = `- ${today(now)} · note · ${note}`;
-  const wrote = appendNote(p.file, line, hooks);
-  if (!wrote.ok) {
-    out(`feedback: ${outcome} but the Log note could not be written (${wrote.code}) — add this line to the Log by hand: ${line}`);
-    code = 1;
-  }
-  return { lines, code, report };
+    let note, outcome, code = 0;
+    if (res.ok && res.url) { out(`feedback: sent — ${res.url}`); note = `feedback sent · ${res.url}`; outcome = `sent as ${res.url}`; }
+    else if (res.ok) {
+      out(`feedback: gh reported success but printed no issue URL — check ${issuesUrl()}?q=label%3A${LABEL}`);
+      note = "feedback sent · no URL returned"; outcome = "sent without a returned URL";
+    } else {
+      out(`feedback: could not send with gh (${res.klass}) — open this link to post it yourself:`);
+      out(fallbackUrl(report.title, report.body));
+      note = `feedback link printed · ${res.klass}`; outcome = "printed the link";
+    }
+
+    const line = `- ${today(now)} · note · ${note}`;
+    const wrote = appendNote(p.file, line, hooks);
+    if (!wrote.ok) {
+      out(`feedback: ${outcome} but the Log note could not be written (${wrote.code}) — add this line to the Log by hand: ${line}`);
+      code = 1;
+    }
+    return { lines, code, report };
+  } finally { releaseGuard(guard); }
 }
+
+// The guard is one file per plan in the temporary folder, holding the sender's process id and start time. A guard
+// whose process is gone, or older than GUARD_STALE_MS, is stale: removed, said in one line, and the send goes on.
+export const GUARD_STALE_MS = 120000;
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+export const guardFile = (dir, plan, slug) => join(dir, `dod-feedback-send-${String(plan.fm.id ?? slug).replace(/[^A-Za-z0-9._-]/g, "_")}.lock`);
+function takeGuard(dir, plan, slug, out) {
+  const file = guardFile(dir, plan, slug);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(file, "wx");
+      try { writeSync(fd, JSON.stringify({ pid: process.pid, started: new Date().toISOString() })); } finally { closeSync(fd); }
+      return { file };
+    } catch (e) {
+      if (e.code !== "EEXIST") return { refused: `feedback: cannot write the send guard (${e.code ?? "EIO"}) — nothing sent` };
+    }
+    let held = null, mtime = Date.now();
+    try { held = JSON.parse(readFileSync(file, "utf8")); } catch { /* being written, or damaged: judged by its age */ }
+    try { mtime = statSync(file).mtimeMs; } catch { continue; } // gone since: try again
+    const started = held && Date.parse(held.started);
+    const age = Date.now() - (Number.isFinite(started) ? started : mtime);
+    const alive = held ? Number.isInteger(held.pid) && pidAlive(held.pid) : true;
+    if (alive && age <= GUARD_STALE_MS) return { refused: `feedback: another send of ${slug} is running — nothing sent` };
+    out(`feedback: removed a stale send guard for ${slug} (${alive ? "older than 120 s" : "its process is gone"})`);
+    try { rmSync(file, { force: true }); } catch { /* the next open says */ }
+  }
+  return { refused: `feedback: another send of ${slug} is running — nothing sent` };
+}
+function releaseGuard(guard) { if (guard?.file) { try { rmSync(guard.file, { force: true }); } catch { /* the next send finds it stale */ } } }
 
 // One line, appended, with compare-before-rename: a plan edited between the read and the write is re-read and the
 // note recomputed, up to three times. Nothing else in the plan changes.
@@ -428,7 +613,8 @@ export function profile(opts = {}) {
   const record = recordPath(home);
   const text = existsSync(record) ? (() => { try { return readOr(record, opts.hooks ?? {}); } catch { return null; } })() : null;
   const c = readConsent(text, storeKey(resolveStore(opts.dir)));
-  return { lines: [...c.warnings, `feedback: consent ${c.consent} · detail ${c.detail} · asked ${c.asked} · record ${RECORD_SHOWN}`], code: 0 };
+  const chosen = c.privateReasons === true ? " · reasons from a private repository: chosen" : "";
+  return { lines: [...c.warnings, `feedback: consent ${c.consent} · detail ${c.detail} · asked ${c.asked}${chosen} · record ${RECORD_SHOWN}`], code: 0 };
 }
 
 export function needsQuestion(opts = {}) {
@@ -445,7 +631,7 @@ export function needsQuestion(opts = {}) {
 export function setConsent(value, opts = {}) {
   const lines = [];
   const out = (l) => lines.push(l);
-  const { home = homeDir(), detail = null, now, dir, hooks = {} } = opts;
+  const { home = homeDir(), detail = null, now, dir, hooks = {}, privateReasons = false } = opts;
   const record = recordPath(home);
   const key = storeKey(resolveStore(dir));
 
@@ -466,7 +652,8 @@ export function setConsent(value, opts = {}) {
       data.version = 1;
     }
     const kept = data.stores[key] && DETAILS.includes(data.stores[key].detail) ? data.stores[key].detail : "numbers";
-    data.stores[key] = { consent: value, detail: detail ?? kept, asked: today(now) };
+    // feedback-privacy D6: the choice is written only by --private-reasons, and every run without it clears it (8.2)
+    data.stores[key] = { consent: value, detail: detail ?? kept, asked: today(now), ...(privateReasons === true ? { private_reasons: true } : {}) };
     const next = `${JSON.stringify(data, null, 2)}\n`;
 
     try { mkdirSync(dirname(record), { recursive: true, mode: 0o700 }); } catch { /* reported by the write below */ }
@@ -476,7 +663,7 @@ export function setConsent(value, opts = {}) {
     catch (e) { out(`feedback: cannot write the consent record (${e.code ?? "EIO"})`); return { lines, code: 1 }; }
     if (ok) {
       try { chmodSync(record, 0o600); } catch { /* not every filesystem has modes; the directory is the real guard */ }
-      out(`feedback: consent ${value} · detail ${data.stores[key].detail} · asked ${data.stores[key].asked} · record ${RECORD_SHOWN}`);
+      out(`feedback: consent ${value} · detail ${data.stores[key].detail} · asked ${data.stores[key].asked}${privateReasons === true ? " · reasons from a private repository: chosen" : ""} · record ${RECORD_SHOWN}`);
       return { lines, code: 0 };
     }
   }
@@ -489,8 +676,8 @@ export function setConsent(value, opts = {}) {
 // Exactly one mode, and every option must belong to it: a flag that does not fit is a usage error before anything
 // is read, so a mistyped command can never send.
 export function parseArgs(argv) {
-  const modes = { "--draft": "draft", "--send": "send", "--profile": "profile", "--set-consent": "set-consent", "--needs-question": "needs-question", "--selftest": "selftest" };
-  const o = { mode: null, slug: null, value: null, dir: null, detail: null, draftId: null, yes: false, again: false, assertTiming: false };
+  const modes = { "--draft": "draft", "--send": "send", "--sample": "sample", "--profile": "profile", "--set-consent": "set-consent", "--needs-question": "needs-question", "--selftest": "selftest" };
+  const o = { mode: null, slug: null, value: null, dir: null, detail: null, draftId: null, yes: false, again: false, assertTiming: false, only: null, privateReasons: false };
   const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -509,28 +696,31 @@ export function parseArgs(argv) {
     if (a === "--yes") { o.yes = true; continue; }
     if (a === "--again") { o.again = true; continue; }
     if (a === "--assert-timing") { o.assertTiming = true; continue; }
+    if (a === "--private-reasons") { o.privateReasons = true; continue; }
+    if (a === "--case") { o.only = argv[++i] ?? null; if (!o.only || o.only.startsWith("--")) return { usage: true }; continue; }
     return { usage: true };
   }
   if (!o.mode) return { usage: true };
   if ((o.yes || o.again || o.draftId) && o.mode !== "send") return { usage: true };
-  if (o.detail && o.mode !== "set-consent") return { usage: true };
-  if (o.assertTiming && o.mode !== "selftest") return { usage: true };
+  if ((o.detail || o.privateReasons) && o.mode !== "set-consent") return { usage: true };
+  if ((o.assertTiming || o.only) && o.mode !== "selftest") return { usage: true };
   return o;
 }
 
 async function main(argv) {
   const o = parseArgs(argv);
   if (o.usage) { console.log(USAGE); process.exitCode = 1; return; }
-  if (o.mode === "selftest") { process.exitCode = await selftest({ assertTiming: o.assertTiming }); return; }
+  if (o.mode === "selftest") { process.exitCode = await selftest({ assertTiming: o.assertTiming, only: o.only }); return; }
   let r;
   if (o.mode === "draft") {
     const c = readConsentForStore(o.dir);
-    r = draft(o.slug, { dir: o.dir, detail: c.detail });
+    r = draft(o.slug, { dir: o.dir, detail: c.detail, privateReasons: c.privateReasons === true, consent: c.consent });
     if (r.error) r.lines.push(r.error);
   } else if (o.mode === "send") r = await send(o.slug, { dir: o.dir, yes: o.yes, again: o.again, draftIdGiven: o.draftId });
+  else if (o.mode === "sample") r = sample({ dir: o.dir });
   else if (o.mode === "profile") r = profile({ dir: o.dir });
   else if (o.mode === "needs-question") r = needsQuestion({ dir: o.dir });
-  else r = setConsent(o.value, { dir: o.dir, detail: o.detail });
+  else r = setConsent(o.value, { dir: o.dir, detail: o.detail, privateReasons: o.privateReasons });
   for (const l of r.lines) console.log(l);
   process.exitCode = r.code;
 }
@@ -627,24 +817,40 @@ ${log.join("\n")}
 const reviewsText = (rounds = 1) => Array.from({ length: rounds }, (_, i) =>
   `## Review ${i + 1} · 2026-09-02 · human · plan commit abc1234\n15/15 layers · 45/45 probes\nVERDICT: ${i + 1 === rounds ? "READY" : "REVISE"}\n`).join("\n");
 
+// `gh repo view` (the visibility read, feedback-privacy D5) answers from GH_VIS_* and is not logged, so GH_LOG holds
+// only the issues a case created; GH_DELAY holds an issue create open, for the racing sends of D23.
 const FAKE_GH = `import { appendFileSync } from "node:fs";
-let stdin = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (d) => { stdin += d; });
-process.stdin.on("end", () => {
-  appendFileSync(process.env.GH_LOG, JSON.stringify({ argv: process.argv.slice(2), stdin }) + "\\n");
-  if (process.env.GH_STDOUT) process.stdout.write(process.env.GH_STDOUT + "\\n");
-  if (process.env.GH_STDERR) process.stderr.write(process.env.GH_STDERR + "\\n");
-  process.exit(Number(process.env.GH_EXIT || 0));
-});
+if (process.argv[2] === "repo") {
+  setTimeout(() => {
+    process.stdout.write((process.env.GH_VIS_OUT ?? '{"isPrivate":false}') + "\\n");
+    process.exit(Number(process.env.GH_VIS_EXIT || 0));
+  }, Number(process.env.GH_VIS_DELAY || 0));
+} else {
+  let stdin = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (d) => { stdin += d; });
+  process.stdin.on("end", () => {
+    appendFileSync(process.env.GH_LOG, JSON.stringify({ argv: process.argv.slice(2), stdin }) + "\\n");
+    setTimeout(() => {
+      if (process.env.GH_STDOUT) process.stdout.write(process.env.GH_STDOUT + "\\n");
+      if (process.env.GH_STDERR) process.stderr.write(process.env.GH_STDERR + "\\n");
+      process.exit(Number(process.env.GH_EXIT || 0));
+    }, Number(process.env.GH_DELAY || 0));
+  });
+}
 `;
 const SLOW_GH = `setTimeout(() => process.exit(0), 5000);\n`;
 const CLOSING_GH = `process.stdin.destroy();\nsetTimeout(() => process.exit(0), 3000);\n`;
 
-// One case's world: a store with one plan, an empty home, and a fake gh that records what it was given.
-function world(root, planOpts = {}, { record, ghSource = FAKE_GH, env = {} } = {}) {
+// One case's world: a store with one plan, an empty home, and a fake gh that records what it was given. `git` makes
+// the world a git repository — "remote" with an origin, "bare" without one — for the visibility read.
+function world(root, planOpts = {}, { record, ghSource = FAKE_GH, env = {}, git = null } = {}) {
   const store = join(root, "docs", "dod");
   mkdirSync(store, { recursive: true });
+  if (git) {
+    spawnSync("git", ["init", "-q"], { cwd: root, shell: false });
+    if (git === "remote") spawnSync("git", ["remote", "add", "origin", "https://github.com/example/example.git"], { cwd: root, shell: false });
+  }
   const slug = planOpts.slug ?? "widget";
   writeFileSync(join(store, `${slug}.md`), planText(planOpts));
   writeFileSync(join(store, `${slug}.reviews.md`), reviewsText(planOpts.reviewRounds ?? 1));
@@ -663,15 +869,327 @@ function world(root, planOpts = {}, { record, ghSource = FAKE_GH, env = {} } = {
   };
 }
 
-const clearGhEnv = () => { for (const k of ["GH_LOG", "GH_STDOUT", "GH_STDERR", "GH_EXIT"]) delete process.env[k]; };
+const clearGhEnv = () => { for (const k of ["GH_LOG", "GH_STDOUT", "GH_STDERR", "GH_EXIT", "GH_DELAY", "GH_VIS_OUT", "GH_VIS_EXIT", "GH_VIS_DELAY"]) delete process.env[k]; };
 
-export async function selftest({ assertTiming = false } = {}) {
+// ---------------------------------------------------------------- feedback-privacy cases (0.3.4)
+//
+// Plan: docs/dod/feedback-privacy.md. Ten named cases, each runnable alone with `--selftest --case <name>`. Each
+// plants the input that must not reach a report and, where one rule is the reason it passes, runs again with that
+// rule disabled and expects the leak — a case that would pass without its rule fails instead. The expected strings
+// are written here, never read from the code under test.
+
+const FP_ISSUE = `https://github.com/${REPO}/issues/7`;
+const FP_NOW = () => new Date(2026, 9, 6);
+const FP_PRIVATE = { GH_VIS_OUT: '{"isPrivate":true}' };
+const fpAmend = (rows) => rows.map(([layer, why], i) => `- A${i + 1} · 2026-09-05 · discovered · +D${i + 3} · layer: ${layer} · ${why}`);
+const fpPlanOpts = (rows) => ({ items: 2, extra: rows.map((_, i) => i + 3), amendments: fpAmend(rows) });
+const fpPlan = (rows) => parsePlan(planText(fpPlanOpts(rows)), "widget.md");
+const fpReasons = (body) => { const i = body.indexOf("## Why the plan missed\n"); return i < 0 ? [] : body.slice(i).split("\n").slice(1).filter((l) => l.startsWith("- ")); };
+const fpMissed = (body) => body.split("\n").find((l) => l.startsWith("missed probes: "));
+const fpWithout = (list, name) => (list ?? []).filter((r) => r.name !== name);
+// the body of a draft is everything between the title's empty line and the one before `draft id:`
+const fpBody = (lines) => { const t = lines.join("\n"); const a = t.indexOf("\n\n"), b = t.indexOf("\n\ndraft id: "); return a < 0 || b < a ? null : t.slice(a + 2, b); };
+const fpBlockAt = (hay, needle) => { for (let i = 0; i + needle.length <= hay.length; i++) if (needle.every((l, k) => hay[i + k] === l)) return i; return -1; };
+const fpSnapshot = (root) => {
+  const out = [];
+  const walk = (d) => { for (const f of readdirSync(d, { withFileTypes: true })) { const p = join(d, f.name); if (f.name === ".git" || f.name === "gh.log") continue; if (f.isDirectory()) walk(p); else out.push([p, readFileSync(p, "utf8")]); } };
+  walk(root);
+  return JSON.stringify(out);
+};
+// one reasons body built straight from a plan; `rules` lets a case disable one scrub or withholding rule
+const fpReport = (rows, opts = {}) => buildReport(fpPlan(rows), [], { version: "0.3.4", detail: "reasons", ...opts });
+
+const FP_CASES = {
+  // D1: every backticked span goes, before the 200-character cut, so a span the cut would halve still goes
+  "fp-backticks": async () => {
+    const rows = [
+      ["4.5", "the `zqa_tbl.zqa_col` column was never covered by a check"],
+      ["5.1", "a `zqbFn()` call was missing from the write path entirely"],
+      ["7.2", "the `zqc policy` was wider than anyone had planned for"],
+      ["7.3", "nested ``zqd`` spans and an unbalanced `zqe tail at the end"],
+      ["9.1", `${"word ".repeat(38)}then \`zqf spans the two hundred character cut zqf\``],
+    ];
+    const bad = [];
+    const text = fpReasons(fpReport(rows).body).join("\n");
+    for (const t of ["zqa", "zqb", "zqc", "zqd", "zqf"]) if (text.includes(t)) bad.push(`${t} kept`);
+    if (text.includes("`")) bad.push("a backtick kept");
+    if (fpReasons(fpReport(rows).body).length !== rows.length) bad.push("a reason line lost");
+    const off = fpReasons(fpReport(rows, { scrubRules: fpWithout(SCRUB_RULES, "backticks") }).body).join("\n");
+    if (!off.includes("zqc")) bad.push("passes with the backtick rule disabled");
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D25: bare identifiers go, backticks or not; abbreviations and hyphenated words stay
+  "fp-identifiers": async () => {
+    const rows = [
+      ["4.5", "the customer_email field kept its old meaning after the move"],
+      ["5.2", "getUserRole was never called on the write path at all"],
+      ["3.4", "billing.invoices kept rows that nobody reads any more"],
+      ["7.1", "plain words such as e.g. an x-ray view stayed exactly as written"],
+    ];
+    const bad = [];
+    const text = fpReasons(fpReport(rows).body).join("\n");
+    for (const t of ["customer_email", "getUserRole", "billing.invoices", "invoices"]) if (text.includes(t)) bad.push(`${t} kept`);
+    for (const t of ["e.g.", "x-ray"]) if (!text.includes(t)) bad.push(`${t} removed`);
+    const off = fpReasons(fpReport(rows, { scrubRules: fpWithout(SCRUB_RULES, "identifiers") }).body).join("\n");
+    if (!off.includes("customer_email")) bad.push("passes with the identifier rule disabled");
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D2: tracker-shaped ids go in any case; versions and probe numbers stay
+  "fp-trackers": async () => {
+    const rows = [
+      ["4.5", "AB-123 was reopened twice before the release went out"],
+      ["5.2", "PROJ2-45 held up the second package for several days"],
+      ["7.2", "the fix in proj-12 came late, after v0.3.4 and probe 7.2"],
+    ];
+    const bad = [];
+    const text = fpReasons(fpReport(rows).body).join("\n");
+    for (const t of ["AB-123", "PROJ2-45", "proj-12"]) if (text.includes(t)) bad.push(`${t} kept`);
+    if (!text.includes("v0.3.4")) bad.push("v0.3.4 removed");
+    const off = fpReasons(fpReport(rows, { scrubRules: fpWithout(SCRUB_RULES, "trackers") }).body).join("\n");
+    if (!off.includes("AB-123")) bad.push("passes with the tracker rule disabled");
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D3: a layer-2 or layer-10 reason keeps its probe and loses every word; the missed-probes line is unchanged
+  "fp-withheld": async () => {
+    const rows = [
+      ["10.1", "zqw1 anyone could write every column of the table"],
+      ["2.2", "zqw2 members could bypass the gate entirely"],
+      ["4.5", "zqw3 every set was narrower than the plan said"],
+      ["10", "zqw4 nobody looked at the gate at all"],
+    ];
+    const bad = [];
+    const r = fpReport(rows);
+    const lines = fpReasons(r.body), text = lines.join("\n");
+    for (const want of ["- 10.1 · withheld (permissions or security)", "- 2.2 · withheld (permissions or security)", "- 10 · withheld (permissions or security)"]) {
+      if (!lines.includes(want)) bad.push(`no line "${want}"`);
+    }
+    for (const t of ["zqw1", "zqw2", "zqw4", "anyone", "bypass", "nobody"]) if (text.includes(t)) bad.push(`${t} kept`);
+    if (!text.includes("zqw3")) bad.push("a 4.5 reason was withheld");
+    const numbersBody = buildReport(fpPlan(rows), [], { version: "0.3.4", detail: "numbers" }).body;
+    if (fpMissed(r.body) !== fpMissed(numbersBody) || !/2\.2 \(1\).*10\.1 \(1\)/.test(fpMissed(r.body) ?? "")) bad.push(`missed probes changed: ${fpMissed(r.body)}`);
+    const off = fpReasons(fpReport(rows, { withholdRules: fpWithout(WITHHOLD_RULES, "security-layers") }).body).join("\n");
+    if (!off.includes("zqw1")) bad.push("passes with withholding disabled");
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D24: a reason holding a listed sensitive word is withheld at any layer; one without is kept
+  "fp-sensitive": async () => {
+    const rows = [
+      ["3.3", "the customer SSN is retained forever"],
+      ["4.1", "an admin role can approve its own change"],
+      ["7.2", "two writers at once lost an entry in the store"],
+    ];
+    const bad = [];
+    const r = fpReport(rows);
+    const lines = fpReasons(r.body), text = lines.join("\n");
+    for (const want of ["- 3.3 · withheld (sensitive word)", "- 4.1 · withheld (sensitive word)"]) if (!lines.includes(want)) bad.push(`no line "${want}"`);
+    for (const t of ["customer", "retained", "forever", "approve", "SSN", "admin"]) if (text.includes(t)) bad.push(`${t} kept`);
+    if (!text.includes("writers")) bad.push("a reason without a listed word was withheld");
+    const numbersBody = buildReport(fpPlan(rows), [], { version: "0.3.4", detail: "numbers" }).body;
+    if (fpMissed(r.body) !== fpMissed(numbersBody)) bad.push("missed probes changed");
+    const off = fpReasons(fpReport(rows, { withholdRules: fpWithout(WITHHOLD_RULES, "sensitive-words") }).body).join("\n");
+    if (!off.includes("retained")) bad.push("passes with the sensitive-word rule disabled");
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D5: private, or visibility unreadable in any of five ways, drafts and sends the plain numbers body; the why-line
+  // is printed to the terminal and never sent; public drafts reasons
+  "fp-visibility": async ({ temp }) => {
+    const rows = [["4.5", "the zqv1 reason that must stay out of private reports"]];
+    const outcomes = [
+      ["public", "remote", {}, true],
+      ["private", "remote", FP_PRIVATE, false],
+      ["no gh", "remote", {}, false, true],
+      ["no remote", "bare", {}, false],
+      ["not a git repository", null, {}, false],
+      ["offline", "remote", { GH_VIS_EXIT: "1" }, false],
+      ["no answer", "remote", { GH_VIS_DELAY: "4000" }, false],
+    ];
+    const bad = [];
+    for (const [name, git, env, reasons, noGh] of outcomes) {
+      clearGhEnv();
+      const root = temp();
+      const w = world(root, fpPlanOpts(rows), { record: undefined, git, env });
+      const gh = noGh ? join(root, "no-such-gh-binary") : w.gh;
+      const d = draft(w.slug, { dir: w.store, home: w.home, detail: "reasons", gh, visibilityTimeoutMs: 1500 });
+      const body = fpBody(d.lines) ?? "";
+      const after = d.lines.slice(d.lines.findIndex((l) => l.startsWith("draft id: ")) + 1);
+      if (body.includes("## Why the plan missed") !== reasons) bad.push(`${name}: ${reasons ? "numbers" : "reasons"} body`);
+      if (!reasons && !after.some((l) => l.startsWith("feedback: "))) bad.push(`${name}: no why-line`);
+      if (body.includes("feedback: ")) bad.push(`${name}: the why-line is in the body`);
+    }
+    clearGhEnv();
+    const root = temp();
+    const w = world(root, fpPlanOpts(rows), { record: undefined, git: "remote", env: { ...FP_PRIVATE, GH_STDOUT: FP_ISSUE } });
+    writeFileSync(recordPath(w.home), JSON.stringify(w.entry("auto", "reasons")));
+    const numbersBody = fpBody(draft(w.slug, { dir: w.store, home: w.home, detail: "numbers", gh: w.gh }).lines);
+    const r = await send(w.slug, { dir: w.store, home: w.home, gh: w.gh, now: FP_NOW });
+    if (w.calls().length !== 1 || w.calls()[0].stdin !== numbersBody) bad.push(`private send body is not the numbers body (${w.calls().length} calls)`);
+    if (!r.lines.some((l) => l.startsWith("feedback: ") && /private/.test(l))) bad.push("private send printed no why-line");
+    clearGhEnv();
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D6: only the exact boolean, set by --set-consent --private-reasons, sends reasons from a private repository
+  "fp-private-choice": async ({ temp }) => {
+    const rows = [["4.5", "the zqp1 reason a private repository keeps to itself"]];
+    const bad = [];
+    const mk = (env, extra = {}, others = {}) => {
+      clearGhEnv();
+      const root = temp();
+      const w = world(root, fpPlanOpts(rows), { record: undefined, git: "remote", env: { GH_STDOUT: FP_ISSUE, ...env } });
+      const rec = w.entry("auto", "reasons");
+      Object.assign(rec.stores[storeKey(w.store)], extra);
+      Object.assign(rec.stores, others);
+      writeFileSync(recordPath(w.home), JSON.stringify(rec, null, 2));
+      return w;
+    };
+    const go = async (w) => {
+      const r = await send(w.slug, { dir: w.store, home: w.home, gh: w.gh, now: FP_NOW });
+      return { r, calls: w.calls().length, reasons: (w.calls()[0]?.stdin ?? "").includes("## Why the plan missed") };
+    };
+    let s = await go(mk(FP_PRIVATE));
+    if (s.calls !== 1 || s.reasons) bad.push(`private without the choice: ${s.calls} calls, reasons ${s.reasons}`);
+    for (const v of ["yes", 1, "true"]) {
+      s = await go(mk(FP_PRIVATE, { private_reasons: v }));
+      if (s.reasons) bad.push(`${JSON.stringify(v)} enabled reasons`);
+      if (s.r.lines.filter((l) => l.includes("private_reasons")).length !== 1) bad.push(`${JSON.stringify(v)} printed no single warning`);
+    }
+    s = await go(mk(FP_PRIVATE, { private_reasons: false }));
+    if (s.reasons || s.r.lines.some((l) => l.includes("private_reasons"))) bad.push("false enabled reasons or warned");
+    s = await go(mk(FP_PRIVATE, { private_reasons: true }));
+    if (!s.reasons) bad.push("private with the choice sent numbers");
+    const unknown = mk({ GH_VIS_EXIT: "1" }, { private_reasons: true });
+    s = await go(unknown);
+    if (s.reasons) bad.push("unknown visibility with the choice sent reasons");
+    if (!/private/.test(profile({ dir: unknown.store, home: unknown.home }).lines.at(-1))) bad.push("--profile omits the choice");
+    // the record: written by the flag, cleared without it, and another store's entry untouched byte for byte
+    const w = mk({}, {}, { "/somewhere/else": { consent: "review", detail: "reasons", asked: "2026-01-01", private_reasons: true } });
+    const otherOf = () => JSON.stringify(JSON.parse(readFileSync(recordPath(w.home), "utf8")).stores["/somewhere/else"]);
+    const before = otherOf();
+    setConsent("review", { dir: w.store, home: w.home, detail: "reasons", privateReasons: true, now: FP_NOW });
+    if (JSON.parse(readFileSync(recordPath(w.home), "utf8")).stores[storeKey(w.store)].private_reasons !== true) bad.push("--private-reasons not recorded as true");
+    setConsent("review", { dir: w.store, home: w.home, detail: "reasons", now: FP_NOW });
+    if ("private_reasons" in JSON.parse(readFileSync(recordPath(w.home), "utf8")).stores[storeKey(w.store)]) bad.push("--set-consent without the flag kept the choice");
+    if (otherOf() !== before) bad.push("another store's entry changed");
+    if (parseArgs(["--set-consent", "review", "--detail", "reasons", "--private-reasons"]).privateReasons !== true) bad.push("--private-reasons not parsed");
+    if (parseArgs(["--draft", "a", "--private-reasons"]).usage !== true) bad.push("--private-reasons accepted outside --set-consent");
+    clearGhEnv();
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D7: --sample is the draft, exactly, for this repository's visibility; a private one adds the labelled preview;
+  // nothing is written or sent and no consent is needed; an empty store prints the labelled example
+  "fp-sample": async ({ temp }) => {
+    const rows = [["4.5", "the zqs1 reason a user sees before they answer"]];
+    const bad = [];
+    const PREVIEW = "preview only — this private repository sends numbers unless you choose reasons for it";
+    for (const [name, env] of [["public", {}], ["private", FP_PRIVATE]]) {
+      clearGhEnv();
+      const root = temp();
+      const w = world(root, fpPlanOpts(rows), { record: undefined, git: "remote", env });
+      // A1: a newer closed plan with a discovered amendment that is still a success report carries no reasons
+      writeFileSync(join(w.store, "shipped.md"), planText({ slug: "shipped", items: 20, extra: [21], amendments: ["- A1 · 2026-09-05 · discovered · +D21 · layer: 7.2 · one late item"] }).replace("closed: 2026-09-10", "closed: 2026-09-12"));
+      const before = fpSnapshot(root);
+      const s = sample({ dir: w.store, home: w.home, gh: w.gh });
+      const lines = s.lines ?? [];
+      const dn = draft(w.slug, { dir: w.store, home: w.home, detail: "numbers", gh: w.gh }).lines;
+      const dr = draft(w.slug, { dir: w.store, home: w.home, detail: "reasons", gh: w.gh }).lines;
+      if (fpBlockAt(lines, dn) < 0) bad.push(`${name}: the numbers sample differs from --draft`);
+      if (fpBlockAt(lines, dr) < 0) bad.push(`${name}: the reasons sample differs from --draft`);
+      if (fpBlockAt(lines, draft("shipped", { dir: w.store, home: w.home, detail: "numbers", gh: w.gh }).lines) >= 0) bad.push(`${name}: the newer success plan was shown`);
+      const at = lines.indexOf(PREVIEW);
+      if (name === "public" && at >= 0) bad.push("public: a preview was printed");
+      if (name === "private") {
+        const chosen = draft(w.slug, { dir: w.store, home: w.home, detail: "reasons", privateReasons: true, gh: w.gh }).lines;
+        if (at < 0) bad.push("private: no labelled preview");
+        else if (fpBlockAt(lines.slice(at + 1), chosen) !== 0) bad.push("private: the preview differs from the draft with the choice recorded");
+        if (at >= 0 && at < fpBlockAt(lines, dn)) bad.push("private: the preview comes before the numbers draft");
+      }
+      if (fpSnapshot(root) !== before) bad.push(`${name}: a file was written`);
+      if (w.calls().length) bad.push(`${name}: gh issue was called`);
+    }
+    clearGhEnv();
+    const root = temp();
+    const store = join(root, "docs", "dod");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "open.md"), planText({ slug: "open", status: "in-progress" }));
+    const e = sample({ dir: store, home: join(root, "home"), gh: [process.execPath, join(root, "no-such-gh.mjs")] });
+    if ((e.lines ?? [])[0] !== "example — not from your plans") bad.push(`empty store: ${JSON.stringify((e.lines ?? [])[0])}`);
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D10: a send from inside the store folder (`dod`) is not refused; the repository's own folder name still is
+  "fp-store-folder": async ({ temp }) => {
+    clearGhEnv();
+    const bad = [];
+    const repo = join(temp(), "acme-portal");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const w = world(repo, fpPlanOpts([["4.5", "the acme-portal screens were never listed in the plan"]]), { record: undefined, env: { GH_STDOUT: FP_ISSUE } });
+    writeFileSync(recordPath(w.home), JSON.stringify(w.entry("auto")));
+    const cwd0 = process.cwd();
+    try {
+      process.chdir(w.store);
+      const r = await send(w.slug, { dir: w.store, home: w.home, gh: w.gh, now: FP_NOW });
+      if (r.code !== 0 || w.calls().length !== 1) bad.push(`refused from the store folder: ${r.lines.at(-1)}`);
+      const d = draft(w.slug, { dir: w.store, home: w.home, detail: "reasons", visibility: { state: "public" } });
+      if (d.lines.join("\n").includes("acme-portal")) bad.push("the reasons draft names the repository folder");
+      const planted = await send(w.slug, { dir: w.store, home: w.home, gh: w.gh, again: true, now: FP_NOW, hooks: { afterReport: (rep) => ({ ...rep, body: `${rep.body}\nacme-portal` }) } });
+      if (planted.code !== 1 || !String(planted.lines.at(-1)).includes("the repository folder name") || w.calls().length !== 1) bad.push(`a body naming acme-portal was not refused: ${planted.lines.at(-1)}`);
+    } finally { process.chdir(cwd0); }
+    clearGhEnv();
+    return [bad.length === 0, bad.join("; ")];
+  },
+  // D23: two sends started together post one issue; a guard whose process is gone, or older than 120 s, is stale
+  "fp-race": async ({ temp }) => {
+    clearGhEnv();
+    const bad = [];
+    const root = temp();
+    const w = world(root, {}, { record: undefined, env: { GH_STDOUT: FP_ISSUE, GH_DELAY: "2000" } });
+    writeFileSync(recordPath(w.home), JSON.stringify(w.entry("auto")));
+    const guards = () => readdirSync(root).filter((f) => f.startsWith("dod-feedback-send-"));
+    const opts = { dir: w.store, home: w.home, gh: w.gh, now: FP_NOW, lockDir: root };
+    const both = await Promise.all([send(w.slug, opts), send(w.slug, opts)]);
+    if (w.calls().length !== 1) bad.push(`${w.calls().length} gh issue create calls`);
+    if (!both.some((r) => r.code === 1 && r.lines.at(-1) === `feedback: another send of ${w.slug} is running — nothing sent`)) bad.push(`no refusal line: ${JSON.stringify(both.map((r) => r.lines.at(-1)))}`);
+    if (guards().length) bad.push("a guard file remains after a finished send");
+    process.env.GH_DELAY = "0";
+    const guard = join(root, "dod-feedback-send-dod-20260901-w001.lock");
+    const gone = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+    writeFileSync(guard, JSON.stringify({ pid: Number(gone.stdout), started: new Date().toISOString() }));
+    const killed = await send(w.slug, { ...opts, again: true });
+    if (killed.code !== 0 || w.calls().length !== 2 || !killed.lines.some((l) => /stale/.test(l))) bad.push(`a dead sender's guard kept the send refused: ${killed.lines.at(-1)}`);
+    writeFileSync(guard, JSON.stringify({ pid: process.pid, started: new Date(Date.now() - 121000).toISOString() }));
+    const old = await send(w.slug, { ...opts, again: true });
+    if (old.code !== 0 || w.calls().length !== 3) bad.push(`a guard older than 120 s kept the send refused: ${old.lines.at(-1)}`);
+    if (guards().length) bad.push("a guard file remains after the stale sends");
+    clearGhEnv();
+    return [bad.length === 0, bad.join("; ")];
+  },
+};
+
+async function runFpCase(name, ctx) {
+  try { return await FP_CASES[name](ctx); }
+  catch (e) { return [false, `threw ${e?.name ?? "Error"}: ${String(e?.message ?? e).slice(0, 160)}`]; }
+}
+
+export async function selftest({ assertTiming = false, only = null } = {}) {
   let pass = 0;
   const failures = [];
   const expect = (name, cond, detail = "") => { if (cond) pass++; else failures.push(`${name}${detail ? ` — ${detail}` : ""}`); };
   const roots = [];
   const temp = () => { const r = mkdtempSync(join(tmpdir(), "dod-fb-")); roots.push(r); return r; };
   const ISSUE = `https://github.com/${REPO}/issues/7`;
+  const finish = () => {
+    clearGhEnv();
+    for (const r of roots) { try { rmSync(r, { recursive: true, force: true }); } catch { /* a temp dir the OS still holds open is swept by the OS */ } }
+    for (const f of failures) console.log(`  ✗ ${f}`);
+    console.log(`selftest dod-feedback: ${pass}/${pass + failures.length} cases (${failures.length ? `${failures.length} failing` : "all pass"})`);
+    return failures.length ? 1 : 0;
+  };
+
+  // one named case alone (feedback-privacy): the plan's evidence commands run exactly the case they cite
+  if (only) {
+    if (!Object.prototype.hasOwnProperty.call(FP_CASES, only)) { console.log(`selftest dod-feedback: no case "${only}"`); return 1; }
+    const [ok, detail] = await runFpCase(only, { temp });
+    expect(only, ok, detail);
+    return finish();
+  }
 
   // ---- D1: off means nothing sent
   {
@@ -726,12 +1244,13 @@ export async function selftest({ assertTiming = false } = {}) {
     // and when only the body changed — an amendment reworded, the rate and so the title identical — the id must
     // still differ, or a user could approve one report and post another
     const w3root = temp();
-    const w3 = world(w3root, { items: 2, extra: [3], amendments: ["- A1 · 2026-09-05 · discovered · +D3 · layer: 7.2 · the first wording"] }, { record: undefined });
+    // a public repository (git with a remote, the fake gh's default answer), so the reasons are drafted (0.3.4 D5)
+    const w3 = world(w3root, { items: 2, extra: [3], amendments: ["- A1 · 2026-09-05 · discovered · +D3 · layer: 7.2 · the first wording"] }, { record: undefined, git: "remote" });
     writeFileSync(recordPath(w3.home), JSON.stringify(w3.entry("review", "reasons")));
-    const d3 = draft(w3.slug, { dir: w3.store, home: w3.home, detail: "reasons" });
+    const d3 = draft(w3.slug, { dir: w3.store, home: w3.home, detail: "reasons", gh: w3.gh });
     const id3 = d3.lines.at(-1).replace("draft id: ", "");
     writeFileSync(w3.planFile, readFileSync(w3.planFile, "utf8").replace("the first wording", "a different wording entirely"));
-    const d3b = draft(w3.slug, { dir: w3.store, home: w3.home, detail: "reasons" });
+    const d3b = draft(w3.slug, { dir: w3.store, home: w3.home, detail: "reasons", gh: w3.gh });
     expect("draft id covers the body", d3b.lines[0] === d3.lines[0] && d3b.lines.at(-1) !== d3.lines.at(-1), `${d3.lines[0]} | ${d3b.lines.at(-1)}`);
     const reworded = await send(w3.slug, { dir: w3.store, home: w3.home, gh: w3.gh, yes: true, draftIdGiven: id3 });
     expect("consent-review refuses a reworded body", reworded.code === 1 && reworded.lines.at(-1) === "feedback: the report changed since the draft was shown — show the user the new draft" && w3.calls().length === 0, JSON.stringify(reworded.lines));
@@ -799,9 +1318,9 @@ export async function selftest({ assertTiming = false } = {}) {
   {
     const p = parsePlan(planText({ items: 4 }), "widget.md");
     const n = { ...reportNumbers(p), baseline: 4, scored: 3, partial: true, waiting: ["D4"], discoveredDesign: 1 };
-    const r = buildReport(p, [], { version: "0.3.3", numbers: n });
+    const r = buildReport(p, [], { version: "test", numbers: n });
     expect("ns-feedback-partial", r.body.includes("prediction rate: 3 / (3 + 1) = 75 %") && r.body.includes("waiting on the owner: 1 (not counted)") && r.rate === 75, JSON.stringify(r.body));
-    const whole = buildReport(p, [], { version: "0.3.3" });
+    const whole = buildReport(p, [], { version: "test" });
     expect("ns-feedback-whole", !whole.body.includes("waiting on the owner"), JSON.stringify(whole.body));
   }
 
@@ -829,6 +1348,7 @@ export async function selftest({ assertTiming = false } = {}) {
       "C:\\Users\\kdpen\\secret\\file.txt", "\\\\server\\share\\x", "/home/kdpen/x/y", "~/x/y", "../up/there", "src/x.ts",
       "https://example.com/a", "www.example.com/a", "someone@example.com", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
       "sk-abcdefgh12345678", "AKIAABCDEFGH1234", "@maintainer", "widget", "skillera-skills",
+      "`spanword`", "zz_snake", "zz.dotted.name", "ZZ-42", // feedback-privacy: backticks, identifiers, trackers
     ];
     const line = planted.join(" ");
     const out = scrub(line, needles);
@@ -1079,7 +1599,8 @@ export async function selftest({ assertTiming = false } = {}) {
     const amendments = Array.from({ length: 50 }, (_, i) => `- A${i + 1} · 2026-09-05 · discovered · +D${501 + i * 2} +D${502 + i * 2} · layer: 7.2 · reason ${i} about C:\\Users\\example\\thing and https://example.com/${i}`);
     writeFileSync(join(store, "big.md"), planText({ slug: "big", items: 500, extra: Array.from({ length: 100 }, (_, i) => 501 + i), amendments }));
     const t0 = Date.now();
-    const d = draft("big", { dir: store, home: join(root, "home"), detail: "reasons" });
+    // visibility given as public: this measures the scrub over a big store, not the gh read (0.3.4 D5)
+    const d = draft("big", { dir: store, home: join(root, "home"), detail: "reasons", visibility: { state: "public" } });
     const ms = Date.now() - t0;
     console.log(`timing: draft in a 1,000-plan store, 500-item plan, 50 amendments — ${ms} ms (budget 500 ms)`);
     expect("draft-timing", d.code === 0 && (!assertTiming || ms < 500), `${ms} ms`);
@@ -1102,6 +1623,12 @@ export async function selftest({ assertTiming = false } = {}) {
     expect("docs-sync SKILL.md stays short", skill.split("\n").length < 500, `${skill.split("\n").length} lines`);
   }
 
+  // ---- feedback-privacy: the ten fp- cases, one count each
+  for (const name of Object.keys(FP_CASES)) {
+    const [ok, detail] = await runFpCase(name, { temp });
+    expect(name, ok, detail);
+  }
+
   // ---- D11: the real gh is never started — run the whole suite again behind a trap on PATH
   if (!process.env.DOD_FEEDBACK_INNER) {
     const root = temp();
@@ -1120,10 +1647,7 @@ export async function selftest({ assertTiming = false } = {}) {
     expect("no-real-gh trap untouched", !existsSync(marker), "the real gh was started");
   }
 
-  for (const r of roots) { try { rmSync(r, { recursive: true, force: true }); } catch { /* a temp dir the OS still holds open is swept by the OS */ } }
-  for (const f of failures) console.log(`  ✗ ${f}`);
-  console.log(`selftest dod-feedback: ${pass}/${pass + failures.length} cases (${failures.length ? `${failures.length} failing` : "all pass"})`);
-  return failures.length ? 1 : 0;
+  return finish();
 }
 
 // Run main() only when invoked directly. Both sides are realpath-resolved: a skill installed as a junction or

@@ -210,6 +210,10 @@ it still does.
      not a recomputed one. Anything but a yes: nothing is sent, and that is the end of it.
    - **auto** — run `--send <slug>` and show its output.
 
+   With `reasons` consented, a private repository — or one whose visibility `gh` cannot read — drafts and sends
+   the numbers only and prints one line saying why, outside the report; reasons go from a private repository only
+   when the user chose them there (`--private-reasons`, setup.md § 3c). Show that line with the draft.
+
    The close is complete before this step and independent of it: a send that fails prints its line, writes
    its own Log note and changes nothing about the closure. Never pass `--yes` without the user's yes.
 
