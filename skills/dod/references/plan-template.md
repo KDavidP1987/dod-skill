@@ -199,7 +199,8 @@ Separator is ` · ` (space, U+00B7 middle dot, space). Never use `·` inside a f
 6. **Lifecycle** — the Log transitions replay legally: `draft → ready → in-progress → done`;
    `cancelled`/`superseded` from any open state; `done → in-progress` only as `reopen An` citing an
    existing amendment dated on/before it; every transition line carries its exact command (grammar table
-   above); `supersede · by <slug>` names a plan in the store; dates non-decreasing. Frontmatter `status`
+   above; a plan approved frozen writes `status → ready · approve · frozen`, valid only with `review: <reviewer> ·
+   frozen`); `supersede · by <slug>` names a plan in the store; dates non-decreasing. Frontmatter `status`
    equals the last transition.
 7. **Done** — every current item checked and verified; `## Report` non-empty; an Epic has ≥ 1 child and
    every declared child is `done`, names this Epic as its parent and passes its own check. `## Children` may appear on any size (v0.2).
@@ -460,6 +461,10 @@ Four additions, all read by `dod-index.mjs`; a v0.1 or v0.2 checker reads each a
   on or after 2026-10-02, every `test` and `cmd` item of the Baseline needs one dated on or before `baselined` and
   written before the `status → ready` line (a backlog plan's pass before that line stands in for it). A note never
   verifies an item; the `pass` line does. Write `<home>` or `<tmp>` for a path under the home or temp directory.
+  A check built by the plan itself, at a later step, takes the deferred form instead (dod 0.3.5):
+  `- <date> · note · dry-run · D<n> · later · step <k> · plants <the failing input it will be given>`. It stands
+  before approval like `n/a`; the item's `pass` then needs an observed dry-run note (`test:` or `cmd:`) written after
+  the deferred one and before the pass.
 - **Miss history**: every probe a discovered or corrected amendment's `layer:` names in two or more done plans,
   plus every `- <n>.<m> · …` row under `profile.md` › `## Project probes`. A plan under the dry-run rule needs, for
   each history probe its Coverage map answers with items, one of those items with a dry-run note that is not `n/a`.
@@ -560,6 +565,34 @@ answered in prose when the surface has no bar.
 does not is dispositioned `advisory by rule`. Every review carries `missing components: none` or a list, and each
 component listed is dispositioned `- M<k> · accepted|rejected · …`. A REVISE left with only advisory findings, and
 with every listed component rejected, stands as READY.
+
+**From dod 0.3.5 (probe-fixes).** These bite a rubric-3 plan created on or after the 0.3.5 release, and reviews and
+amendments dated on or after it; everything earlier checks as before.
+
+- **The whole and the siblings (probe 4.5).** A Business rules section holds exactly one `whole:` line and one
+  `siblings:` line. `whole: <name>` says the parts the plan lists add up to something; an item then reconciles it,
+  its `fails when:` naming the unexplained (or unaccounted, unattributed, remainder) share over a stated percentage:
+  `(fails when: the unexplained share is over 1 % of the total)`. `whole: none — <reason of 12 characters or more>`
+  says nothing adds up. `siblings: <a>, <b>[, …]` names the family of things the same check could apply to (two
+  or more names: letters, digits, spaces, hyphens); `siblings: none — <reason>` says there is none.
+- **Twins.** An item whose title or statement names some but not all of the declared siblings ends its statement,
+  before the evidence, with `· twins: <sibling> D<n>[, <sibling> D<n> …]` — the other siblings and the items that
+  check them — or `· twins: none — <reason>`.
+- **Field probes.** The field list (`references/field-probes.md`, layers.md › Field probes) is asked like the
+  store's own miss history: each field probe the Coverage map answers with items needs one of them observed in a dry
+  run before approval. Only the owner waives one: `- S-<n> · assumed · risk · <text> · field: <n.m>` and
+  `- YYYY-MM-DD · note · accept · field <n.m> · owner`. A probe in both the profile and the field list is asked once,
+  in the profile's words.
+- **Misses name the probe.** A `discovered` or `corrected` amendment writes `layer: <n>.<m>`, never a bare layer.
+- **A probe that blocks twice.** When blocking findings in two review rounds in a row name the same probe, settle it as
+  an assumption naming it (`- S-<n> · reversible · probe <n.m>: … · fallback: …`) instead of another rewrite; the
+  next round's review prompt names the probes the last round blocked on.
+- **Undeclared families.** Every review carries `undeclared families: none` or the sets, and each set is
+  dispositioned `- UF<k> · accepted · <C or D id>` or `- UF<k> · rejected · <reason>` (review.md › Record).
+
+**Release plans.** A plan that publishes a release often promises that no commit after its close commit touches
+anything but the plan itself. Write that rule to allow `docs/dod/<slug>.reviews.md` as well as `docs/dod/<slug>.md`:
+a re-review after a gating amendment lands in the reviews file, after the close.
 
 **Build freeze.** From the `status → in-progress · start` Log line the plan's promises are frozen:
 
@@ -717,6 +750,31 @@ The texts `--check` prints:
 - ``<a>: a rubric-3 `discovered` amendment names what it changes — `changes: outcome | component | design | limit`; a change of method alone is a Log note: `note · method · <what changed>` ``
 - ``<c> is the skeleton `--migrate --to 3` wrote — split it into the parts the product is incomplete without, each naming its D-items``
 - `` `risk:` still reads TODO — state the risk the owner accepts, in one sentence of at least 12 characters ``
+
+From dod 0.3.5 (probe-fixes) — on a rubric-3 plan created, a review dated or an amendment dated on or after the
+release — `--check` also prints:
+
+- ``probe <p> is a field probe, missed in <k> of <n> field reports (<sentence>), and none of its items <ids> has an observed dry run — run one, or have the owner accept the risk (`· assumed · risk · … · field: <p>` and `note · accept · field <p> · owner`)``
+- `probe <p> is a project probe of profile.md ("<wording>") and a field probe, and none of its items <ids> has an observed dry run`
+- ``probe <p> is waived by <s>, but the Log has no `note · accept · field <p> · owner` — only the owner waives a field probe``
+- `field probes: references/field-probes.md unreadable (<code>) — the field probes are not asked` (a warning)
+- `` Business rules 4.5 has no `whole:` line — write `whole: <the whole the parts add up to>` or `whole: none — <why, 12 characters or more>` ``
+- ``Business rules has <k> `whole:` lines — write one``
+- `` `whole:` line is not `whole: <name>` or `whole: none — <reason of 12 characters or more>`: <text> ``
+- `` `whole: <name>` has no item whose `fails when:` names the unexplained share over a stated percentage (`… the unexplained share is over 1 % …`) ``
+- `` Business rules 4.5 has no `siblings:` line — write `siblings: <a>, <b>[, …]` or `siblings: none — <why>` ``
+- ``Business rules has <k> `siblings:` lines — write one``
+- `` `siblings:` line is not two or more names (letters, digits, spaces, hyphens) split by `,`, or `none — <reason>`: <text> ``
+- ``<d> checks <member>, one of the siblings <set>, and has no `twins:` — write `twins: <sibling> D<n>, …` or `twins: none — <why>` before its evidence``
+- ``<d>'s `twins:` is not `<sibling> D<n>[, <sibling> D<n> …]` naming declared siblings and this plan's items, or `none — <reason>`: <text>``
+- ``<a> is a <kind> amendment naming layer <l>, not a probe — write the probe it missed (`layer: <l>.<m>`)``
+- ``probe <p> blocked in Review <a> and Review <b> — settle it as an assumption naming it (`- S-<n> · reversible · probe <p>: … · fallback: …`) instead of another rewrite``
+- ``Review <n> has no `undeclared families:` line — a review from dod 0.3.5 on answers it: `undeclared families: none`, or the sets``
+- ``Review <n>'s `undeclared families:` line is not `none` or sets of two or more names split by `;`: <text>``
+- `` Review <n> names undeclared family <k> (<set>) with no `- UF<k> · accepted · <C or D id>` or `- UF<k> · rejected · <reason>` ``
+- `` Review <n>: <text> is not `- UF<k> · accepted · <C or D id>` or `- UF<k> · rejected · <reason>` ``
+- ``<d> passes on <date>, but its dry run was deferred to step <k> (plants <plants>) and no observed dry-run note follows the deferral — run the check on its planted input and log `note · dry-run · <d> · <type>: …` before the pass``
+- ``` `status → ready · approve · frozen` needs a frozen approval — `review: <reviewer> · frozen` on a rubric-3 plan; otherwise write `status → ready · approve · review: <reviewer>` ```
 
 The texts `--migrate --to 3` writes and prints:
 

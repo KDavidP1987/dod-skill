@@ -372,9 +372,9 @@ Gate — acceptance & testability: passed — every Considered layer 2–14 maps
 - pm-views · done · A23
 - cross-model-review · planned · A24
 - scoring-rules · planned · A26
-- probe-fixes · planned · A28
+- probe-fixes · in-progress · A28
 - north-star · in-progress · A30
-- feedback-privacy · in-progress · A31
+- feedback-privacy · done · A31
 - release-0-3-2 · done · A29
 - release-0-3 · done
 

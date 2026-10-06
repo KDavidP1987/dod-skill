@@ -33,7 +33,8 @@ transitions must be legal (plan-template.md invariant 6). Read this file before 
 
 No other transitions. `ready` cannot go back to `draft` — amend it instead, which may re-open review.
 Every transition line carries its exact command (`plan`, `approve`, `start`, `close`, `cancel · <reason>`,
-`supersede · by <slug>`, `reopen An`); the script rejects any other wording. A plan cancelled or
+`supersede · by <slug>`, `reopen An`); the script rejects any other wording. A rubric-3 plan approved frozen
+writes `status → ready · approve · frozen`, and only a plan whose `review:` ends ` · frozen` may. A plan cancelled or
 superseded after `approve` keeps its `baselined` date — the baseline is history, not state.
 `status` never changes lifecycle state; observation is not evidence that work began.
 

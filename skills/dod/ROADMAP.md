@@ -6,6 +6,17 @@ the [README](README.md#roadmap).
 
 ## Shipped
 
+- **0.3.5 — checks learned from the field.** Planning questions and checks from eighteen field reports:
+  - when a plan splits a whole into parts, it says whether they add up on real data, and an item fails when the
+    unexplained share is over a stated percentage;
+  - a check given to one member of a family (one drive of several, one currency of several) names its siblings,
+    and the plan says which of them need it too;
+  - `field-probes.md` lists the ten questions that real projects missed most, and a new plan answers each with a
+    check it runs once before approval;
+  - a missed question is recorded by its number, not just its layer, and a question that blocks two review
+    rounds running is settled as a written assumption instead of another rewrite;
+  - smaller fixes: a dry run for a check that is not built yet, Codex's review forms read as written, a frozen
+    approval line, review files that cannot cross, and a plan size that leaves out the frozen copy.
 - **0.3.4 — private feedback stays private.** A privacy fix from a field report: the opt-in feedback that
   explains a plan's misses in words (`detail: reasons`) loses code names, identifiers, tracker ids and the text
   of any permissions or security answer; a private repository sends numbers only unless you choose otherwise;
@@ -30,12 +41,6 @@ the [README](README.md#roadmap).
 - **0.2.0 — rubric 2.** Forty-nine probes and nine gating, the work-breakdown view, the reading levels, the
   opt-in feedback loop.
 - **0.1 — the first release.** Fifteen layers, independent review, the frozen baseline, the prediction rate.
-
-## 0.3.5
-
-- `probe-fixes` — planning checks learned from eighteen field reports: a plan's parts that must add up to the
-  whole, a reconciliation item that proves they do, look-alike items that should be one, a list of the questions
-  plans miss most, and a gap that names the exact question it missed.
 
 ## 0.4.0
 

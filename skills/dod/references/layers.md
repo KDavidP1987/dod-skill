@@ -20,6 +20,13 @@ turns out not to apply is *answered* by writing the test you performed in the pl
 counted, not removed. A `reversible` assumption is a decision (with a stated `fallback:`) and may answer
 a probe; a `decision-required` assumption is an unknown and leaves its probe a Gap.
 
+**Field probes.** `field-probes.md` lists the probes that real projects missed most often, counted from the
+public field reports, each with one sentence on what was missed. Give each one a real answer: an item whose check
+you run once on the draft, before approval, with what it printed recorded as a dry-run note. `--check` asks this of
+every plan created from dod 0.3.5 on. Your project's own probes in `profile.md` count first: when both lists
+name a probe, it is asked once, in your project's words. Only the owner can let a plan skip a field probe, by
+accepting the risk in writing.
+
 ---
 
 ## 1. Purpose & typical use
@@ -43,12 +50,12 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
 - 4.2 Invariants that must never be violated (uniqueness, ordering, balance, totals).
 - 4.3 Temporal rules — time zones, cut-offs, expiry, retroactive changes.
 - 4.4 ⛔ Precedence when rules conflict, and who decides an exception.
-- 4.5 (rubric 2) “Every X” sets: for every rule of the form “every X”, how X is computed, what valid content the computation misses, who checks the computation — and, when a tool derives X (a grep, a diff, a directory walk), whether that tool can see every member at the moment it runs: a file not yet tracked, a file this build creates, a path the tool excludes.
+- 4.5 (rubric 2) “Every X” sets: for every rule of the form “every X”, how X is computed, what valid content the computation misses, who checks the computation — and, when a tool derives X (a grep, a diff, a directory walk), whether that tool can see every member at the moment it runs: a file not yet tracked, a file this build creates, a path the tool excludes. When the X are parts of a whole the user cares about (the lines of an invoice, the hours of a timesheet), ask whether they add up to that whole on real data, what contributes to the whole that is not an X, and where the remainder is shown: answer `whole: <the whole>`, with an item whose `fails when:` names the unexplained share over a stated percentage, or `whole: none — <why>`. When a check is given to one member of a family (one currency of several, one platform of those supported), ask whether each sibling needs it too: answer `siblings: <a, b, …>` or `siblings: none — <why>`, and on each item that checks one member, `twins: <sibling> D<n>, …` or `twins: none — <why>`.
 
 ## 5. Internal interfaces
 - 5.1 What it reads from other features/modules, with paths or symbols.
 - 5.2 What it writes to or changes about other features, and what breaks there if this is wrong.
-- 5.3 Shared types, events, schemas or contracts it introduces or alters — each field enumerated against what the code emits or reads, not against the prose that describes it.
+- 5.3 Shared types, events, schemas or contracts it introduces or alters — each field enumerated against what the code emits or reads, not against the prose that describes it — and count every function, including the ones the platform calls for you (triggers, hooks, callbacks).
 
 ## 6. External dependencies & contracts
 - 6.1 Every external API, service, package, or vendor it depends on — version, quota, cost — and every input contract sampled across all its record types, not only the ones the feature expects.
@@ -89,14 +96,14 @@ a probe; a `decision-required` assumption is an unknown and leaves its probe a G
   Scoring (kept off the score-redacted review page, which shows the line above): a failing case never run is a Gap.
 
 ## 13. Performance & scale
-- 13.1 The latency or throughput budget, and the hot path that decides it.
+- 13.1 The latency or throughput budget, and the hot path that decides it — with one measurement taken in the recon spike by the platform's own advisor or profiler, its number quoted.
 - 13.2 Limits and pagination — what is bounded and what happens at the bound, the case a limit came from, and the valid case it excludes.
 
 ## 14. Rollout & compatibility
 - 14.1 How it ships: flag, staged, all at once; who can turn it off.
 - 14.2 Backward compatibility with existing clients, data, and integrations.
 - 14.3 ⛔ Rollback: the exact steps to undo it, whether they are still possible after data has been written, and the commit range they cover when the change is committed more than once.
-- 14.4 ⛔ (rubric 2) Paths walked: every path the change ships, writes or regenerates, found by walking the Build plan step by step — generated indexes, tooling, fixtures, notes, ignored and generated files, the shipped files a release has to touch, the paths the review process itself writes (review pages, re-review records) and the plan store itself.
+- 14.4 ⛔ (rubric 2) Paths walked: every path the change ships, writes or regenerates, found by walking the Build plan step by step — generated indexes, tooling, fixtures, notes, ignored and generated files, the shipped files a release has to touch, the paths a review itself writes (review pages, re-review records) and the plan store itself. Run the paths check once on the draft and list what it finds: ignored and lock files, a sibling plan's paths, a check that needs a later step's output.
 
 ## 15. Out of scope
 - 15.1 What was explicitly considered and excluded, so a builder does not fill the gap by guessing.

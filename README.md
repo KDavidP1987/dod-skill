@@ -5,7 +5,7 @@
 
 **Plan the whole feature before your AI agent builds it — then see how much of the work the plan foresaw.**
 
-Version 0.3.4 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Roadmap](skills/dod/ROADMAP.md) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
+Version 0.3.5 · MIT · an [Agent Skill](https://agentskills.io) by [SkillEra](https://skillera.io) · [Roadmap](skills/dod/ROADMAP.md) · [Walkthrough of a real plan](docs/dod-walkthrough.md)
 
 <img src="skills/dod/assets/plan-page.png" alt="A plan page written by dod: the pm-views plan, done, 42 of 42 items verified, prediction rate 88 %, with its predicted-against-observed chart" width="100%">
 
@@ -364,11 +364,11 @@ and security details taken out, and from a private repository only if you choose
 
 ## Roadmap <!-- required -->
 
-- **Now — 0.3.4:** a privacy fix for the opt-in feedback. Reasons lines lose code names, identifiers,
-  tracker ids and security details; a private repository sends numbers only unless you choose otherwise; and
-  the consent question shows a real draft from your own plans first.
-- **Then — 0.3.5:** planning checks learned from eighteen field reports — parts that must add up to the whole, and look-alike items.
-- **0.4.0:** a second reviewer from another model family, scoring that sorts a reversal by its cause, hook
+- **Now — 0.3.5:** planning checks learned from eighteen field reports. When a plan splits a whole into
+  parts (the lines of a bill, the programs using a disk), it asks whether they add up and adds a check that fails
+  when too much is unexplained; a check given to one member of a family is carried to the others; and the ten
+  questions real projects missed most must each be answered with a check run once before approval.
+- **Then — 0.4.0:** a second reviewer from another model family, scoring that sorts a reversal by its cause, hook
   reminders, and the `audit` and `enhance` commands.
 - **1.0 — under consideration:** after 0.4.0, once dod has been used on outside projects with a prediction rate
   at or above 75 %.
@@ -429,7 +429,7 @@ tests/trigger-logs/2026-10-03-plan.jsonl            the transcript behind the 0.
 </details>
 
 [![validate](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml/badge.svg)](https://github.com/KDavidP1987/dod-skill/actions/workflows/validate.yml)
-[![plugin 0.3.4](https://img.shields.io/badge/plugin-0.3.4-1F3A5F)](.claude-plugin/plugin.json)
+[![plugin 0.3.5](https://img.shields.io/badge/plugin-0.3.5-1F3A5F)](.claude-plugin/plugin.json)
 [![license MIT](https://img.shields.io/badge/license-MIT-2E7D6B)](LICENSE)
 
 ---

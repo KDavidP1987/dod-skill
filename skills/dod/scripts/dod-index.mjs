@@ -156,6 +156,8 @@ const CMD = {
   cancelled: /^cancel · \S.*$/, superseded: /^supersede · by ([a-z0-9]+(?:-[a-z0-9]+)*)$/,
   start: /^start$/, reopen: /^reopen (A\d+)$/,
 };
+// probe-fixes D11: `status → ready · approve · frozen`, valid only where `review:` ends ` · frozen`
+const FROZEN_APPROVE = "approve · frozen";
 const LEGAL = { draft: [null], ready: ["draft"], "in-progress": ["ready", "done"], done: ["in-progress"], cancelled: ["draft", "ready", "in-progress"], superseded: ["draft", "ready", "in-progress"] };
 
 const RE = {
@@ -170,6 +172,8 @@ const RE = {
   advances: /\badvances ((?:C\d+)(?:[ ,]+C\d+)*)/,
   // north-star D8: `- S-<n> · assumed · risk · <text> · finding: Review <k> F<f>`
   assumedRisk: /^risk · \S.* · finding: Review (\d+) F(\d+)\s*$/,
+  // probe-fixes D36: the owner waives a field probe — `- S-<n> · assumed · risk · <text> · field: <n.m>`
+  assumedField: /^risk · \S.* · field: (\d{1,2}\.\d)\s*$/,
   op: /^([+~-])(D\d+)$/,
   transition: /^- (\d{4}-\d{2}-\d{2}) · status → ([a-z-]+)(?: · (.*))?$/,
   evidence: /^- (\d{4}-\d{2}-\d{2}) · (D\d+) · (pass|fail) · (test|cmd|file|manual|host-check): (.+?) · ([^·]+?) · ([^·]+?)$/,
@@ -188,6 +192,9 @@ const RE = {
   disposition: /^- F(\d+) · (accepted|rejected) · /,
   // north-star D4: the reviewer's components sweep, and the author's disposition of each component it names
   missingLine: /^missing components:\s*(.*)$/i,
+  // probe-fixes D33: the reviewer's families sweep, and the author's disposition of each set it names
+  familiesLine: /^undeclared families:\s*(.*)$/i,
+  dispositionUF: /^- UF(\d+) · (accepted|rejected) · (.*)$/,
   dispositionM: /^- M(\d+) · (accepted|rejected) · /,
   // north-star D1: what a rubric-3 blocking finding says would fail
   blocksTag: /\bblocks:\s*`?(outcome|component|design|limit)\b/i,
@@ -305,7 +312,7 @@ export function parsePlan(text, file = "<memory>") {
     if (m[2] === "validated" && !/ · source: \S/.test(m[3])) bad("Assumptions", l, "  (validated needs ` · source: <path / doc / who confirmed>`)");
     if (m[2] === "reversible" && !/ · fallback: \S/.test(m[3])) bad("Assumptions", l, "  (reversible needs ` · fallback: <what changes if wrong>`)");
     // north-star D8: an accepted risk at the freeze names the finding it accepts
-    if (m[2] === "assumed" && !RE.assumedRisk.test(m[3])) bad("Assumptions", l, "  (assumed needs `risk · <the risk accepted> · finding: Review <n> F<f>`)");
+    if (m[2] === "assumed" && !RE.assumedRisk.test(m[3]) && !RE.assumedField.test(m[3])) bad("Assumptions", l, "  (assumed needs `risk · <the risk accepted> · finding: Review <n> F<f>`)");
     plan.assumptions.push({ id: m[1], type: m[2], text: m[3] });
   }
   for (const l of sec("Coverage")) {
@@ -326,7 +333,7 @@ export function parseReviews(text) {
   for (const l of text.split(/\r?\n/)) {
     lineNo++;
     let m = l.match(RE.reviewHead);
-    if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), tags: new Map(), probes: new Map(), earlier: null, coverage: null, missing: null, mDispositions: new Set(), mRejected: new Set(), dispText: new Map(), ...headFields(l) }); inDisp = false; block = null; continue; }
+    if (m) { reviews.push({ n: Number(m[1]), date: m[2], reviewer: m[3], verdict: null, findings: new Set(), dispositions: new Set(), rejected: new Set(), blocks: new Map(), tags: new Map(), probes: new Map(), earlier: null, coverage: null, missing: null, mDispositions: new Set(), mRejected: new Set(), dispText: new Map(), families: null, familiesBad: false, ufDisp: new Map(), ufBad: [], ...headFields(l) }); inDisp = false; block = null; continue; }
     if (!reviews.length) continue;
     const r = reviews.at(-1);
     // field-fixes D4, A1: a VERDICT not alone on its line is glued — unless it is quoted in backticks or double quotes
@@ -337,10 +344,14 @@ export function parseReviews(text) {
     if (inDisp) {
       m = l.match(RE.disposition); if (m) { r.dispositions.add(m[1]); r.dispText.set(m[1], l); if (m[2] === "rejected") r.rejected.add(m[1]); }
       m = l.match(RE.dispositionM); if (m) { r.mDispositions.add(m[1]); if (m[2] === "rejected") r.mRejected.add(m[1]); }
+      m = l.match(RE.dispositionUF); if (m) r.ufDisp.set(m[1], { kind: m[2], text: m[3].trim() }); else if (/^- UF/.test(l)) r.ufBad.push(l);
       continue;
     }
     if (/^EARLIER:/.test(l)) { r.earlier = l.trim(); block = null; continue; }
     // north-star D4: `missing components: none`, or the components the reviewer found missing, `;`- or `,`-separated
+    // probe-fixes D33: `undeclared families: none`, or sibling sets split by `;`, each two or more names split by `,`
+    m = l.match(RE.familiesLine);
+    if (m) { const v = m[1].trim().replace(/\.$/, ""); r.families = /^none$/i.test(v) ? [] : v.split(/\s*;\s*/).map((s) => s.split(/\s*,\s*/).filter(Boolean)); r.familiesBad = !v || r.families.some((s) => s.length < 2 || s.some((x) => !SIBLING_NAME.test(x))); block = null; continue; }
     m = l.match(RE.missingLine);
     if (m) { const v = m[1].trim().replace(/\.$/, ""); r.missing = /^none$/i.test(v) ? [] : v.split(/\s*[;,]\s*/).filter(Boolean); block = null; continue; }
     // a finding's block runs from its Fn line to the line before the next finding, coverage or VERDICT line: what
@@ -757,8 +768,13 @@ export const HISTORY_MIN_PLANS = 2;
 // D1: `dry-run · D<n> · <test|cmd>: <code span> → <printed>` or `dry-run · D<n> · n/a · <reason>`. The command is
 // one Markdown code span — a command holding a backtick uses a longer fence — so an arrow inside it never splits it.
 const DRY_RE = /^dry-run · (D\d+) · (?:(test|cmd): (`+)(.+?)\3 → (.+)|n\/a · (.+))$/;
+// probe-fixes D9: `dry-run · D<n> · later · step <k> · plants <input>` — the check is built at step k; before approval
+// it stands like `n/a`, and the item's `pass` then needs an observed dry-run note after it
+const DRY_LATER_RE = /^dry-run · (D\d+) · later · step (\d+) · plants (\S.*)$/;
 function readDryRun(plan, note) {
   if (!note.text.startsWith("dry-run ·")) return;
+  const l = note.text.match(DRY_LATER_RE);
+  if (l) { plan.dryRuns.push({ seq: note.seq, date: note.date, id: l[1], type: null, command: null, printed: null, na: `later · step ${l[2]} · plants ${l[3]}`, later: { step: Number(l[2]), plants: l[3].trim() }, text: note.text }); return; }
   const m = note.text.match(DRY_RE);
   if (m) plan.dryRuns.push({ seq: note.seq, date: note.date, id: m[1], type: m[2] ?? null, command: m[4] ?? null, printed: m[5] ?? null, na: m[6] ?? null, text: note.text });
   else plan.dryRunMalformed.push({ seq: note.seq, date: note.date, id: note.text.match(/^dry-run · (D\d+)\b/)?.[1] ?? null, text: note.text });
@@ -802,6 +818,7 @@ export function calibChecks(plan, ctx) {
     for (const [p, h] of ctx.history ?? []) {
       const m = map.get(p);
       if (!m || m.prose || !m.items.length) continue;
+      if (ctx.fieldOwned?.has(p)) continue; // probe-fixes D36: asked once, by fieldChecks
       const vals = { p, k: h.plans, n: h.done, ids: m.items.join(" ") };
       if (/* calib-mutant:depth */(!m.items.some((id) => observed.has(id)))/* calib-end */) problems.push(fmtC(h.plans >= HISTORY_MIN_PLANS ? "depthMissing" : "depthMissingProfile", vals));
     }
@@ -923,7 +940,7 @@ export function loadStore(dir) {
     s = readStoreOnce(dir); reads = 2;
     if (/* calib-mutant:store-changed-twice */(changed(s))/* calib-end */) s.faults.push(fmtC("storeChanged"));
   }
-  STORE_META.set(s.plans, { history: missHistory(s.plans, s.profile), faults: s.faults, reads, encoding: s.encoding });
+  STORE_META.set(s.plans, { history: missHistory(s.plans, s.profile), faults: s.faults, reads, encoding: s.encoding, profile: s.profile });
   return s.plans;
 }
 // the history of a loaded plan list: loadStore's, with the profile; any other list computes it once, without one
@@ -978,11 +995,194 @@ export function historyLine(plan, all) {
   const { history, faults } = storeMeta(all);
   const n = all.filter((p) => p.fm.status === "done" && !p.parseErrors.length).length;
   const list = historyOrder(history).map(([p, h]) => (h.plans >= HISTORY_MIN_PLANS ? `${p} in ${h.plans} of ${h.done} done plans` : `${p} profile`));
+  // probe-fixes D5: the field probes the store's own history does not already name, in the field list's order
+  if (pfApplies(plan)) for (const [p, fp] of fieldProbes()) if (!history.has(p)) list.push(`${p} field ${fp.reports} of ${FIELD_REPORTS} reports`);
   const coverage = plan.fm.coverage_author ?? "pending";
   const line = /* calib-mutant:history-empty */(list.length > 0)/* calib-end */ ? fmtC("historyLine", { coverage, list: list.join(" · ") }) : fmtC("historyNone", { coverage, n });
   return line + (/* calib-mutant:history-partial */(faults.length > 0)/* calib-end */ ? fmtC("historyPartial", { k: faults.length }) : "");
 }
 // calib:end
+
+// probe-fixes (dod 0.3.5): the rules bite plans created (D2, D3, D5, D36), reviews dated (D33) and amendments dated (D7)
+// on or after the release date, a constant set at the release step and never at run time (4.3); earlier plans check
+// as before. scripts/checks/pf-planted.mjs fills its fixtures' dates with it.
+export const PF_FROM = "2026-10-06";
+export const pfApplies = (plan) => validDate(plan.fm.created ?? "") && plan.fm.created >= PF_FROM;
+export const MESSAGES_PF = {
+  fieldMissing: "probe <p> is a field probe, missed in <k> of <n> field reports (<sentence>), and none of its items <ids> has an observed dry run — run one, or have the owner accept the risk (`· assumed · risk · … · field: <p>` and `note · accept · field <p> · owner`)",
+  fieldProject: "probe <p> is a project probe of profile.md (\"<wording>\") and a field probe, and none of its items <ids> has an observed dry run",
+  fieldUnaccepted: "probe <p> is waived by <s>, but the Log has no `note · accept · field <p> · owner` — only the owner waives a field probe",
+  fieldUnreadable: "field probes: references/field-probes.md unreadable (<code>) — the field probes are not asked",
+  wholeMissing: "Business rules 4.5 has no `whole:` line — write `whole: <the whole the parts add up to>` or `whole: none — <why, 12 characters or more>`",
+  wholeTwice: "Business rules has <k> `whole:` lines — write one",
+  wholeMalformed: "`whole:` line is not `whole: <name>` or `whole: none — <reason of 12 characters or more>`: <text>",
+  wholeNoItem: "`whole: <name>` has no item whose `fails when:` names the unexplained share over a stated percentage (`… the unexplained share is over 1 % …`)",
+  siblingsMissing: "Business rules 4.5 has no `siblings:` line — write `siblings: <a>, <b>[, …]` or `siblings: none — <why>`",
+  siblingsTwice: "Business rules has <k> `siblings:` lines — write one",
+  siblingsMalformed: "`siblings:` line is not two or more names (letters, digits, spaces, hyphens) split by `,`, or `none — <reason>`: <text>",
+  twinsMissing: "<d> checks <member>, one of the siblings <set>, and has no `twins:` — write `twins: <sibling> D<n>, …` or `twins: none — <why>` before its evidence",
+  twinsMalformed: "<d>'s `twins:` is not `<sibling> D<n>[, <sibling> D<n> …]` naming declared siblings and this plan's items, or `none — <reason>`: <text>",
+  bareLayer: "<a> is a <kind> amendment naming layer <l>, not a probe — write the probe it missed (`layer: <l>.<m>`)",
+  blockedTwice: "probe <p> blocked in Review <a> and Review <b> — settle it as an assumption naming it (`- S-<n> · reversible · probe <p>: … · fallback: …`) instead of another rewrite",
+  familiesLine: "Review <n> has no `undeclared families:` line — a review from dod 0.3.5 on answers it: `undeclared families: none`, or the sets",
+  familiesMalformed: "Review <n>'s `undeclared families:` line is not `none` or sets of two or more names split by `;`: <text>",
+  familiesUndisposed: "Review <n> names undeclared family <k> (<set>) with no `- UF<k> · accepted · <C or D id>` or `- UF<k> · rejected · <reason>`",
+  familiesDisposition: "Review <n>: <text> is not `- UF<k> · accepted · <C or D id>` or `- UF<k> · rejected · <reason>`",
+  laterUnobserved: "<d> passes on <date>, but its dry run was deferred to step <k> (plants <plants>) and no observed dry-run note follows the deferral — run the check on its planted input and log `note · dry-run · <d> · <type>: …` before the pass",
+};
+export const fmtP = (key, vals = {}) => MESSAGES_PF[key].replace(/<([A-Za-z]+)>/g, (m, k) => (k in vals ? String(vals[k]) : m));
+// D4: the field-probe list the skill ships — `- <n.m> · <count> reports · #<i> #<j> … · <sentence>` — read once per run
+export const FIELD_PROBES = join(dirname(SELF), "..", "references", "field-probes.md");
+export const FIELD_REPORTS = 18; // field reports #1–#18 of the public repository
+const FIELD_RE = /^- (\d{1,2}\.\d) · (\d+) reports · ((?:#\d+ ?)+) · (\S.*)$/;
+export function parseFieldProbes(text) {
+  const out = new Map();
+  for (const l of String(text).split(/\r?\n/)) { const m = l.match(FIELD_RE); if (m) out.set(m[1], { reports: Number(m[2]), issues: [...m[3].matchAll(/#(\d+)/g)].map((x) => Number(x[1])), sentence: m[4].trim() }); }
+  return out;
+}
+// the seam: a selftest sets `text` to its own list; `null` reads the shipped file
+export const pfSeams = { text: null };
+let fieldCache = null;
+export function fieldProbes() {
+  if (pfSeams.text !== null) return parseFieldProbes(pfSeams.text);
+  if (!fieldCache) { try { fieldCache = { map: parseFieldProbes(readFileSync(FIELD_PROBES, "utf8")), fault: null }; } catch (e) { fieldCache = { map: new Map(), fault: e.code ?? "error" }; } }
+  return fieldCache.map;
+}
+const fieldFault = () => (pfSeams.text !== null ? null : (fieldProbes(), fieldCache.fault));
+// D36: a profile row's wording — its text after `- <n.m> · `, continuation lines joined
+export function projectWording(text) {
+  const out = new Map();
+  let inSection = false, cur = null;
+  for (const l of String(text).split(/\r?\n/)) {
+    if (l.startsWith("## ")) { inSection = /^## Project probes\s*$/.test(l); cur = null; continue; }
+    if (!inSection) continue;
+    const m = l.match(/^- (\d{1,2}\.\d{1,2}) · (\S.*)$/);
+    if (m) { cur = m[1]; out.set(cur, m[2].trim()); continue; }
+    if (cur && /^\s+\S/.test(l)) out.set(cur, `${out.get(cur)} ${l.trim()}`); else cur = null;
+  }
+  return out;
+}
+const FIELD_ACCEPT_RE = /^accept · field (\d{1,2}\.\d) · ([^·]+?)\s*$/;
+// D5, D36: in calibration D4's window (a dry run before the ready line, dated on or before `baselined`), each field
+// probe the Coverage map answers with items needs one of them observed — unless the store's own history already asks
+// it, or the owner waived it. A probe answered by prose is not asked, as in D4.
+export function fieldChecks(plan, ctx) {
+  const problems = [], warnings = [];
+  if (!pfApplies(plan)) return { problems, warnings };
+  const fault = fieldFault();
+  if (fault) { warnings.push(fmtP("fieldUnreadable", { code: fault })); return { problems, warnings }; }
+  const base = plan.fm.baselined ?? "none";
+  if (ctx.readySeq === undefined || !validDate(base)) return { problems, warnings };
+  const observed = new Set(plan.dryRuns.filter((d) => d.na === null && d.seq < ctx.readySeq && d.date <= base).map((d) => d.id));
+  const map = probeMap(plan), wording = projectWording(ctx.profile ?? "");
+  const waivers = new Map();
+  for (const a of plan.assumptions) { const m = a.type === "assumed" && (a.text ?? "").match(RE.assumedField); if (m && !waivers.has(m[1])) waivers.set(m[1], a.id); }
+  const accepted = new Set(plan.notes.map((x) => x.text.match(FIELD_ACCEPT_RE)).filter((m) => m && sameName(m[2], "owner")).map((m) => m[1]));
+  for (const [p, fp] of fieldProbes()) {
+    const h = ctx.history?.get(p);
+    if (h && h.plans >= HISTORY_MIN_PLANS) continue; // the store's own history asks it (calibration D4)
+    const m = map.get(p);
+    if (!m || m.prose || !m.items.length || m.items.some((id) => observed.has(id))) continue;
+    const ids = m.items.join(" ");
+    if (h?.profile) { problems.push(fmtP("fieldProject", { p, wording: wording.get(p) ?? "", ids })); continue; } // neither list removes a probe from the other
+    const s = waivers.get(p);
+    if (s && accepted.has(p)) continue;
+    problems.push(s ? fmtP("fieldUnaccepted", { p, s }) : fmtP("fieldMissing", { p, k: fp.reports, n: FIELD_REPORTS, sentence: fp.sentence, ids }));
+  }
+  return { problems, warnings };
+}
+// D3: a sibling's name — letters, digits, spaces and hyphens, never a comma or `·`
+const SIBLING_NAME = /^[A-Za-z0-9][A-Za-z0-9 -]*$/;
+const ruleLines = (plan, key) => Object.entries(plan.sections).filter(([name]) => /^Business rules\b/.test(name)).flatMap(([, ls]) => ls)
+  .map((l) => l.match(new RegExp(`^\\s*(?:[-*]\\s+)?${key}:\\s*(.*)$`))).filter(Boolean).map((m) => ({ line: m[0].trim(), value: m[1].trim() }));
+const NONE_RE = /^none — (.+)$/;
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// D8: the probes a review's blocking findings name
+export function blockedProbes(r) {
+  return new Set([...r.findings].filter((f) => whatBlocks(r, f)).flatMap((f) => [...(r.probes.get(f) ?? [])]));
+}
+// D2, D3 (plans created from PF_FROM), D7 (amendments dated from it), D8 (the latest review dated from it); rubric 3 only
+export function pfPlanChecks(plan) {
+  const out = [];
+  if (pfApplies(plan)) {
+    // D2: the whole, and the item that reconciles it
+    const wholes = ruleLines(plan, "whole");
+    if (!wholes.length) out.push(fmtP("wholeMissing"));
+    else if (wholes.length > 1) out.push(fmtP("wholeTwice", { k: wholes.length }));
+    else {
+      const v = wholes[0].value, none = v.match(NONE_RE);
+      if (!v || (/^none\b/i.test(v) && !(none && none[1].trim().length >= 12))) out.push(fmtP("wholeMalformed", { text: echoText(wholes[0].line) }));
+      else if (!none && !plan.items.some((it) => { const fw = failsWhenOf(it) ?? ""; return /\b(unexplained|unaccounted|unattributed|remainder)\b/i.test(fw) && /\d+(?:\.\d+)?\s*%/.test(fw); })) out.push(fmtP("wholeNoItem"));
+    }
+    // D3: the siblings, and the twins of every item that checks one of them
+    const sibs = ruleLines(plan, "siblings");
+    let names = [];
+    if (!sibs.length) out.push(fmtP("siblingsMissing"));
+    else if (sibs.length > 1) out.push(fmtP("siblingsTwice", { k: sibs.length }));
+    else {
+      const v = sibs[0].value, none = v.match(NONE_RE);
+      const list = v.split(/\s*,\s*/);
+      if (none && none[1].trim()) names = [];
+      else if (!/^none\b/i.test(v) && list.length >= 2 && list.every((x) => SIBLING_NAME.test(x))) names = list;
+      else out.push(fmtP("siblingsMalformed", { text: echoText(sibs[0].line) }));
+    }
+    const ids = new Set(plan.items.map((x) => x.id));
+    for (const it of plan.items) {
+      const parts = it.statement.split(/ · (?=twins:)/);
+      const own = `${it.title ?? ""} ${parts[0]}`;
+      const twinsText = parts.slice(1).join(" · ");
+      const named = names.filter((n) => new RegExp(`(?<![A-Za-z0-9])${escRe(n)}(?![A-Za-z0-9])`, "i").test(own));
+      if (twinsText) {
+        const v = twinsText.replace(/^twins:\s*/, "").trim();
+        const none = v.match(NONE_RE);
+        const entries = none ? [] : v.split(/\s*,\s*/).map((e) => e.match(/^([A-Za-z0-9][A-Za-z0-9 -]*?) (D\d+)$/));
+        const ok = parts.length === 2 && (none ? none[1].trim().length > 0 : entries.length > 0 && entries.every((m) => m && names.some((n) => n.toLowerCase() === m[1].toLowerCase()) && !named.some((n) => n.toLowerCase() === m[1].toLowerCase()) && ids.has(m[2])));
+        if (!ok) out.push(fmtP("twinsMalformed", { d: it.id, text: echoText(`twins: ${v}`) }));
+      } else if (named.length && named.length < names.length) out.push(fmtP("twinsMissing", { d: it.id, member: named.join(", "), set: names.join(", ") }));
+    }
+  }
+  // D7: a discovered or corrected amendment dated from PF_FROM names a probe, not a bare layer
+  for (const a of plan.amendments) {
+    if (!(a.kind === "discovered" || a.kind === "corrected") || !validDate(a.date) || a.date < PF_FROM) continue;
+    for (const l of String(a.layer).split(/[\s,]+/).filter(Boolean)) if (/^\d{1,2}$/.test(l)) out.push(fmtP("bareLayer", { a: a.id, kind: a.kind, l }));
+  }
+  // D8: a probe that blocked in the last two rounds, with no assumption naming it
+  const [ra, rb] = plan.reviews.slice(-2);
+  if (ra && rb && rb.n === ra.n + 1 && validDate(rb.date) && rb.date >= PF_FROM) {
+    const before = blockedProbes(ra);
+    for (const p of blockedProbes(rb)) if (before.has(p) && !plan.assumptions.some((x) => probeTokens(x.text ?? "").has(p))) out.push(fmtP("blockedTwice", { p, a: ra.n, b: rb.n }));
+  }
+  return out;
+}
+// D14: a plan's printed size leaves out its `## Baseline` section — the frozen copy of the items is not growth
+export function planSize(bytes) {
+  const t = Buffer.isBuffer(bytes) ? bytes.toString("utf8") : String(bytes);
+  const m = t.match(/(^|\n)## Baseline[^\n]*(?:\n(?!## )[^\n]*)*/);
+  const cut = m ? m[0].slice(m[1].length) : "";
+  return Buffer.byteLength(t, "utf8") - Buffer.byteLength(cut, "utf8");
+}
+// D9: a pass after a deferred dry run needs an observed dry-run note between the deferral and the pass
+export function pfLaterChecks(plan) {
+  const out = [];
+  for (const d of plan.dryRuns.filter((x) => x.later)) {
+    const it = plan.items.find((x) => x.id === d.id);
+    for (const e of plan.evidence.filter((x) => x.id === d.id && x.result === "pass" && x.seq > d.seq)) {
+      if (!plan.dryRuns.some((o) => o.id === d.id && o.na === null && o.seq > d.seq && o.seq < e.seq)) out.push(fmtP("laterUnobserved", { d: d.id, date: e.date, k: d.later.step, plants: echoText(d.later.plants), type: it?.type ?? "cmd" }));
+    }
+  }
+  return out;
+}
+// D33: a review dated from PF_FROM answers the families sweep, and every set it names is dispositioned
+export function pfReviewChecks(plan, r) {
+  const out = [];
+  if (!validDate(r.date) || r.date < PF_FROM) return out;
+  if (r.families === null) out.push(fmtP("familiesLine", { n: r.n }));
+  else if (r.familiesBad) out.push(fmtP("familiesMalformed", { n: r.n, text: echoText(r.families.map((s) => s.join(", ")).join("; ") || "(empty)") }));
+  else r.families.forEach((s, k) => { const d = r.ufDisp.get(String(k + 1)); if (!d) out.push(fmtP("familiesUndisposed", { n: r.n, k: k + 1, set: s.join(", ") })); });
+  for (const [k, d] of r.ufDisp) if ((d.kind === "accepted" && !/^[CD]\d+\b/.test(d.text)) || !d.text) out.push(fmtP("familiesDisposition", { n: r.n, text: echoText(`- UF${k} · ${d.kind} · ${d.text}`) }));
+  for (const l of r.ufBad) out.push(fmtP("familiesDisposition", { n: r.n, text: echoText(l) }));
+  return out;
+}
 
 // review-loop D2: the round-cap rule. A run is the reviews after the last READY (all of them when there is none);
 // a codex or subagent review at position 4 or later of its run needs the owner's note, keyed to review numbers so
@@ -1526,8 +1726,11 @@ export function checkPlan(plan, all = [plan]) {
       for (const f of r.findings) if (r.tags.get(f) === "blocking" && !whatBlocks(r, f) && !/advisory by rule/i.test(r.dispText.get(f) ?? "")) problems.push(fmtN("blocksMissing", { n: r.n, f }));
       if (r.missing === null) problems.push(fmtN("missingLine", { n: r.n }));
       else r.missing.forEach((name, k) => { if (!r.mDispositions.has(String(k + 1))) problems.push(fmtN("missingUndisposed", { n: r.n, m: k + 1, name: cleanLine(name).slice(0, 60) })); });
+      problems.push(...pfReviewChecks(plan, r)); // probe-fixes D33
     }
   }
+  // probe-fixes D2, D3, D7, D8: wholes, twins, the probe a miss names, a probe blocking twice
+  if (rubric === 3) problems.push(...pfPlanChecks(plan));
   // north-star D5: the design bar is answered by a check, or by a named judge for a qualitative bar
   if (rubric === 3) {
     const bar = probeMap(plan).get("11.5");
@@ -1716,6 +1919,9 @@ export function checkPlan(plan, all = [plan]) {
       const m = t.detail.match(CMD.superseded);
       if (!m) problems.push("superseded transition must read `status → superseded · supersede · by <slug>`");
       else if (!all.find((p) => p.slug === m[1])) problems.push(`superseded by ${m[1]}, which is not in the store`);
+    } else if (t.status === "ready" && t.detail === FROZEN_APPROVE) {
+      // probe-fixes D11: the approve line of a plan approved frozen, on that plan only
+      if (!(rubric === 3 && / · frozen$/.test(String(fm.review ?? "")))) problems.push("`status → ready · approve · frozen` needs a frozen approval — `review: <reviewer> · frozen` on a rubric-3 plan; otherwise write `status → ready · approve · review: <reviewer>`");
     } else if (CMD[t.status] && !CMD[t.status].test(t.detail) && !(rubric === 3 && t.status === "done" && t.detail === PARTIAL_CLOSE)) problems.push(`transition to ${t.status} must read \`status → ${t.status} · ${t.status === "draft" ? "plan" : t.status === "ready" ? "approve" : "close"}\``);
     prev = t.status;
   }
@@ -1733,8 +1939,17 @@ export function checkPlan(plan, all = [plan]) {
   const dr = plan.assumptions.filter((a) => a.type === "decision-required").length;
   if (dr && status !== "draft") problems.push(`${dr} decision-required assumption(s) while status is ${status}`);
 
-  // 7a. calibration (D1, D2, D24): dry-run notes
-  { const ctx = { readySeq, reachedReady, history: storeMeta(all).history }; const c = calibChecks(plan, ctx); problems.push(...c.problems); warnings.push(...c.warnings); info.push(...ctx.info); }
+  // 7a. calibration (D1, D2, D24): dry-run notes; 7b. probe-fixes (D5, D36): a plan created on or after PF_FROM also
+  // answers the field probes, and a profile probe that is also a field probe is asked once, by fieldChecks, in the
+  // project's wording
+  {
+    const meta = storeMeta(all);
+    const ctx = { readySeq, reachedReady, history: meta.history, profile: meta.profile ?? "" };
+    if (pfApplies(plan)) ctx.fieldOwned = new Set([...fieldProbes().keys()].filter((p) => { const h = meta.history.get(p); return h && h.profile && h.plans < HISTORY_MIN_PLANS; }));
+    const c = calibChecks(plan, ctx); problems.push(...c.problems); warnings.push(...c.warnings); info.push(...ctx.info);
+    const f = fieldChecks(plan, ctx); problems.push(...f.problems); warnings.push(...f.warnings);
+    problems.push(...pfLaterChecks(plan));
+  }
 
   // 8. work packages (wbs-view D15–D17)
   const wbs = packageCheck(plan);
@@ -2763,6 +2978,9 @@ export function reviewPrompt(dir, plans, args, { git = gitReader(), readBack = (
   const k = run.length && last ? Math.max(0, ...[...last.findings].map(Number)) : 0;
   const parts = [];
   if (k) parts.push(`This is a revised plan; your earlier findings were F1–F${k}.`);
+  // probe-fixes D8: the next round is told which probes the last one blocked on
+  const blockedLast = last && rubricOf(plan) === 3 && validDate(last.date) && last.date >= PF_FROM ? [...blockedProbes(last)] : [];
+  if (blockedLast.length) parts.push(`The last round, Review ${last.n}, blocked on probe${blockedLast.length > 1 ? "s" : ""} ${blockedLast.join(", ")}. Say for each whether the plan now answers it. A probe that blocks in two rounds in a row is settled as an assumption the owner can read, not rewritten a third time.`);
   // D6, A3: environment values are withheld from the text that comes from the user — the code files, the scope
   // rows and the plan — while the rubric and layers.md, the skill's own text, go verbatim
   let withheld = 0;
@@ -2788,7 +3006,7 @@ export function reviewPrompt(dir, plans, args, { git = gitReader(), readBack = (
   try { back = readBack(path); } catch { back = Buffer.alloc(0); }
   if (sha256(back) !== sha256(bytes)) return fail(fmtV("promptReplaced", { name }));
   const phash = sha256(bytes).slice(0, 12);
-  const size = statSync(plan.file).size;
+  const size = planSize(readFileSync(plan.file));
   const heading = `## Review ${n} · ${date} · ${reviewer} · ${planDirty || !commit ? "plan uncommitted" : `plan commit ${commit}`} · plan ${size} B · ${plan.items.length} items · files ${code.included.length} · ${mhash} · prompt ${phash}${scope ? ` · scope ${scope.join(",")}` : ""}`;
   const lines = [
     `review-prompt: wrote ${name} in the temporary folder ($TMPDIR, or %TEMP% on Windows) · ${bytes.length} B`,
@@ -4870,7 +5088,7 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
       const ok = [
         r.status === 0, text.startsWith(rubricFirst), text.includes(layersText), rows.length === 15,
         !/coverage_author/.test(text), !text.includes("REPORT-MARKER"), RE.reviewHead.test(heading),
-        hf.stamp?.bytes === statSync(p.file).size, hf.stamp?.items === 2, hf.prompt === sha256(readFileSync(file)).slice(0, 12),
+        hf.stamp?.bytes === planSize(readFileSync(p.file)), hf.stamp?.items === 2, hf.prompt === sha256(readFileSync(file)).slice(0, 12),
       ];
       // a plan missing a Coverage row is refused and writes nothing
       const d2 = store({ "pc.md": pp("pc").replace(/^\| 15 \|.*\n/m, "") });
@@ -4974,8 +5192,10 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
         const t = join(tmp, "rp-live");
         mkdirSync(t, { recursive: true });
         const r = reviewPrompt(labStore, loadPlans(labStore), { slug: "review-loop", reviewer: "human" }, { tmp: t, env: {} });
-        const want = `included skills/dod/scripts/dod-index.mjs · sha256 ${sha256(readFileSync(SELF)).slice(0, 12)} ·`;
-        expect("review-prompt.live", r.code === 0 && r.lines.some((l) => l.startsWith(`  ${want}`)), JSON.stringify(r.lines.slice(0, 6)));
+        // probe-fixes (Log): past the 512 KB code budget on its own, the checker is listed `over budget` with its size (D8's rule)
+        const own = readFileSync(SELF);
+        const want = own.length > 512 * 1024 ? `left out skills/dod/scripts/dod-index.mjs — over budget (${own.length} B,` : `included skills/dod/scripts/dod-index.mjs · sha256 ${sha256(own).slice(0, 12)} ·`;
+        expect("review-prompt.live", r.code === 0 && r.lines.some((l) => l.startsWith(`  ${want}`)), JSON.stringify(r.lines.filter((l) => l.includes("dod-index.mjs")).concat(r.lines.slice(0, 3))));
       }
     }
 
@@ -5589,6 +5809,228 @@ process.on("exit", () => { if (process.env.DOD_SPY_LOG) write(process.env.DOD_SP
     // a plan whose one review is a REVISE that does not stand as READY
     const notReady = (slug) => `review is codex but ${slug}.reviews.md has no VERDICT: READY`;
     const METHOD = "F1 blocking · 7.2 use a lock file and a retry loop for the writer";
+
+    // probe-fixes D5, D36: the field probes reach a store with no done plan, and agree with the project's own probes
+    {
+      const FIELD = "- 14.4 · 9 reports · #2 #6 · the paths a change ships were found during the build\n- 7.2 · 6 reports · #1 #4 · a second writer at the same moment was not planned for\n";
+      const NA = "- 2026-09-14 · note · dry-run · D1 · n/a · the runner is not written yet\n- 2026-09-14 · note · dry-run · D2 · n/a · the lint config lands in step 2\n";
+      const OBS = "- 2026-09-14 · note · dry-run · D1 · n/a · the runner is not written yet\n- 2026-09-14 · note · dry-run · D2 · cmd: `npm run lint` → 0 errors\n";
+      const cov = { rows: { 7: { pointer: `${LAYERS[6]} › 7.1 D1; 7.2 D1 D2; 7.3 D1` }, 14: { pointer: `${LAYERS[13]} › 14.1 D1; 14.2 D1; 14.3 D1; 14.4 D1 D2` } } };
+      const WAIVE = "- A-2 · assumed · risk · a path found late is fixed in the build · field: 14.4\n";
+      const PROFILE = "# profile\n\n## Project probes\n- 7.2 · ask who else writes the same record at once\n  and what the second one sees\n";
+      const fp = (o = {}) => {
+        pfSeams.text = o.field ?? FIELD;
+        try {
+          let text = rp("f", 3, { preReady: o.dry ?? NA, cov, log: o.log ?? "", fm: o.old ? {} : { created: PF_FROM, baselined: PF_FROM } });
+          text = text.replace("## Components\n", "## Business rules & invariants\n- whole: none — the export copies rows and adds nothing up\n- siblings: none — the export writes one format, CSV\n\n## Components\n");
+          if (o.waive) text = text.replace("- A-1 · validated · Users are authenticated · source: src/auth.ts\n", (m) => m + WAIVE);
+          const plans = loadStore(store({ "f.md": text, "f.reviews.md": rv("F1 advisory · wording"), ...(o.profile ? { "profile.md": o.profile } : {}) }));
+          const p = plans.find((x) => x.slug === "f");
+          const all = checkPlan(p, plans).problems;
+          return { all, probes: all.filter((x) => x.startsWith("probe ")), line: historyLine(p, plans) };
+        } finally { pfSeams.text = null; }
+      };
+      const miss = (p, k, sentence) => fmtP("fieldMissing", { p, k, n: FIELD_REPORTS, sentence, ids: "D1 D2" });
+      const M144 = miss("14.4", 9, "the paths a change ships were found during the build"), M72 = miss("7.2", 6, "a second writer at the same moment was not planned for");
+
+      // pf-field-history (D5): a fresh store's new plan answers each field probe with an observed dry run
+      {
+        const bad = fp(), good = fp({ dry: OBS }), old = fp({ old: true }), empty = fp({ field: "" });
+        const r = [
+          JSON.stringify(bad.probes) === JSON.stringify([M144, M72]) && bad.all.length === 2,
+          good.all.length === 0,
+          old.all.length === 0 && !old.line.includes("field"),
+          bad.line.endsWith("miss history: 14.4 field 9 of 18 reports · 7.2 field 6 of 18 reports"),
+          empty.all.length === 0 && empty.line.endsWith("miss history: none yet (0 done plans)"),
+          parseFieldProbes(FIELD).get("7.2")?.issues.join(",") === "1,4",
+        ];
+        expect("pf-field-history", r.every(Boolean), JSON.stringify({ r, bad, good: good.all, old, empty: empty.line }));
+      }
+
+      // pf-precedence (D36): a probe in both lists is asked once, in the project's words; only the owner waives a field probe
+      {
+        const shared = fp({ profile: PROFILE });
+        const P72 = fmtP("fieldProject", { p: "7.2", wording: "ask who else writes the same record at once and what the second one sees", ids: "D1 D2" });
+        const waived = fp({ waive: true });
+        const accepted = fp({ waive: true, log: `- ${PF_FROM} · note · accept · field 14.4 · owner\n` });
+        const byPlanner = fp({ waive: true, log: `- ${PF_FROM} · note · accept · field 14.4 · planner\n` });
+        const U = fmtP("fieldUnaccepted", { p: "14.4", s: "A-2" });
+        const r = [
+          JSON.stringify(shared.probes) === JSON.stringify([M144, P72]) && !shared.all.some((x) => x.includes("project probe of profile.md and none")),
+          shared.line.includes("7.2 profile") && !shared.line.includes("7.2 field"),
+          JSON.stringify(waived.probes) === JSON.stringify([U, M72]),
+          JSON.stringify(accepted.probes) === JSON.stringify([M72]) && accepted.all.length === 1,
+          JSON.stringify(byPlanner.probes) === JSON.stringify([U, M72]),
+          JSON.stringify(fp({ profile: PROFILE, waive: true, log: `- ${PF_FROM} · note · accept · field 7.2 · owner\n` }).probes).includes("project probe of profile.md (\\\"ask who"),
+        ];
+        expect("pf-precedence", r.every(Boolean), JSON.stringify({ r, shared, waived: waived.probes, accepted: accepted.all, byPlanner: byPlanner.probes }));
+      }
+
+      // probe-fixes D2, D3, D7, D8, D33: the plan-shape rules, on a plan created on PF_FROM and one created before it
+      const ONE = "- siblings: none — the export writes one format, CSV\n";
+      const pg = (o = {}) => {
+        let text = rp("g", 3, { items: o.items, amend: o.amend, fm: o.old ? {} : { created: PF_FROM } });
+        text = text.replace("## Components\n", `## Business rules & invariants\n${o.rules ?? `- whole: none — the export copies rows and adds nothing up\n${ONE}`}\n## Components\n`);
+        if (o.assume) text = text.replace("- A-1 · validated · Users are authenticated · source: src/auth.ts\n", (m) => m + o.assume);
+        const plans = loadStore(store({ "g.md": text, "g.reviews.md": o.reviews ?? rv("F1 advisory · wording").replace("2026-09-15", PF_FROM).replace("missing components: none", "missing components: none\nundeclared families: none") }));
+        const p = plans.find((x) => x.slug === "g");
+        return [...pfPlanChecks(p), ...p.reviews.flatMap((r) => pfReviewChecks(p, r))];
+      };
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+      // pf-reconcile (D2): a named whole needs an item that fails on the unexplained share; `none` needs a reason
+      {
+        const SHARE = "- [ ] D1 · Export downloads as CSV · test: export.test.ts (fails when: the export is empty)\n- [ ] D2 · Rows add up · cmd: npm run total → 0 (fails when: the unexplained share is over 1 % of the total)";
+        const named = `- whole: the export total\n${ONE}`;
+        const r = [
+          same(pg(), []),
+          same(pg({ rules: named }), [fmtP("wholeNoItem")]),
+          same(pg({ rules: named, items: SHARE }), []),
+          same(pg({ rules: `- whole: none — short\n${ONE}` }), [fmtP("wholeMalformed", { text: "- whole: none — short" })]),
+          same(pg({ rules: ONE }), [fmtP("wholeMissing")]),
+          same(pg({ rules: `${named}- whole: the row count\n` }), [fmtP("wholeTwice", { k: 2 })]),
+          same(pg({ rules: "", old: true }), []),
+        ];
+        expect("pf-reconcile", r.every(Boolean), JSON.stringify({ r, named: pg({ rules: named }), short: pg({ rules: `- whole: none — short\n${ONE}` }) }));
+      }
+
+      // pf-twins (D3): an item that checks some siblings names its twins for the rest, or says why none
+      {
+        const W = "- whole: none — the export copies rows and adds nothing up\n";
+        const FAM = `${W}- siblings: CSV, JSON, XML\n`;
+        const it = (tw) => `- [ ] D1 · A CSV export downloads · ${tw}test: export.test.ts (fails when: the export is empty)\n- [ ] D2 · Lint passes · cmd: npm run lint → 0 errors (fails when: the export is empty)`;
+        const r = [
+          same(pg({ rules: FAM, items: it("") }), [fmtP("twinsMissing", { d: "D1", member: "CSV", set: "CSV, JSON, XML" })]),
+          same(pg({ rules: FAM, items: it("twins: JSON D2, XML D2 · ") }), []),
+          same(pg({ rules: FAM, items: it("twins: none — JSON and XML ship next release · ") }), []),
+          pg({ rules: FAM, items: it("twins: YAML D2 · ") })[0]?.startsWith("D1's `twins:` is not"),
+          pg({ rules: FAM, items: it("twins: JSON D9 · ") })[0]?.startsWith("D1's `twins:` is not"),
+          pg({ rules: FAM, items: it("twins: JSON, XML D2 · ") })[0]?.startsWith("D1's `twins:` is not"),
+          same(pg({ rules: `${W}- siblings: CSV\n` }), [fmtP("siblingsMalformed", { text: "- siblings: CSV" })]),
+          same(pg({ rules: W }), [fmtP("siblingsMissing")]),
+        ];
+        expect("pf-twins", r.every(Boolean), JSON.stringify({ r, missing: pg({ rules: FAM, items: it("") }) }));
+      }
+
+      // pf-families (D33): a review dated from PF_FROM answers the families sweep, and each set it names is dispositioned
+      {
+        const rev = (fam, disp = "") => rv("F1 advisory · wording", { disp: `- F1 · advisory · noted\n${disp}` }).replace("2026-09-15", PF_FROM).replace("missing components: none", `missing components: none${fam === null ? "" : `\nundeclared families: ${fam}`}`);
+        const r = [
+          same(pg({ reviews: rev("none") }), []),
+          same(pg({ reviews: rev(null) }), [fmtP("familiesLine", { n: 1 })]),
+          same(pg({ reviews: rev("CSV, JSON") }), [fmtP("familiesUndisposed", { n: 1, k: 1, set: "CSV, JSON" })]),
+          same(pg({ reviews: rev("CSV, JSON", "- UF1 · rejected · the export writes one format\n") }), []),
+          same(pg({ reviews: rev("CSV, JSON", "- UF1 · accepted · D1\n") }), []),
+          pg({ reviews: rev("CSV") })[0]?.startsWith("Review 1's `undeclared families:` line is not"),
+          same(pg({ reviews: rev(null).replace(PF_FROM, "2026-09-15") }), []),
+        ];
+        expect("pf-families", r.every(Boolean), JSON.stringify({ r, line: pg({ reviews: rev(null) }), und: pg({ reviews: rev("CSV, JSON") }), bad: pg({ reviews: rev("CSV") }) }));
+      }
+
+      // pf-probe-layer (D7): a discovered or corrected amendment dated from PF_FROM names a probe, not a bare layer
+      {
+        const am = (date, kind, layer) => `- A1 · ${date} · ${kind} · ~D2 · layer: ${layer} · the lint missed a file\n`;
+        const r = [
+          same(pg({ amend: am(PF_FROM, "discovered", "12") }), [fmtP("bareLayer", { a: "A1", kind: "discovered", l: "12" })]),
+          same(pg({ amend: am(PF_FROM, "corrected", "12") }), [fmtP("bareLayer", { a: "A1", kind: "corrected", l: "12" })]),
+          same(pg({ amend: am(PF_FROM, "discovered", "12.4") }), []),
+          same(pg({ amend: am(PF_FROM, "defect", "12") }), []),
+          same(pg({ amend: am("2026-09-16", "discovered", "12") }), []),
+        ];
+        expect("pf-probe-layer", r.every(Boolean), JSON.stringify({ r, bare: pg({ amend: am(PF_FROM, "discovered", "12") }) }));
+      }
+
+      // pf-blocked-twice (D8): a probe blocking two rounds running is settled as an assumption, and round 3's prompt says so
+      {
+        const B = "F1 blocking · blocks: outcome · two writers lose an entry (7.2)";
+        const round = (n, date, v) => rv(B, { v, disp: "- F1 · accepted · rewritten\n" }).replace("## Review 1 · 2026-09-15", `## Review ${n} · ${date}`).replace("missing components: none", "missing components: none\nundeclared families: none");
+        const two = (d1, d2) => `${round(1, d1, "REVISE")}\n${round(2, d2, "REVISE")}`;
+        const T = fmtP("blockedTwice", { p: "7.2", a: 1, b: 2 });
+        const S = "- S-1 · reversible · probe 7.2: the second writer retries once · fallback: a lock file\n";
+        const r = [
+          pg({ reviews: two(PF_FROM, PF_FROM) }).includes(T),
+          !pg({ reviews: two(PF_FROM, PF_FROM), assume: S }).includes(T),
+          !pg({ reviews: two("2026-09-15", "2026-09-16") }).some((x) => x.startsWith("probe 7.2 blocked")),
+          !pg({ reviews: `${round(1, PF_FROM, "REVISE")}\n${round(2, PF_FROM, "REVISE").replace(B, "F1 blocking · blocks: outcome · an empty export (8.1)")}` }).some((x) => x.startsWith("probe ")),
+        ];
+        // the third round's prompt names the probe the last round blocked on
+        const d = store({ "g.md": rp("g", 3, { fm: { created: PF_FROM, review: "pending" } }).replace("## Components\n", `## Business rules & invariants\n- whole: none — the export copies rows and adds nothing up\n${ONE}\n## Components\n`), "g.reviews.md": `${round(1, PF_FROM, "REVISE")}\n${round(2, PF_FROM, "REVISE").replace(B, "F1 blocking · blocks: outcome · an empty export (8.1)")}` });
+        const tg = join(d, "tmp"); mkdirSync(tg, { recursive: true });
+        // an empty field list, so the shipped list's probes (pf-field-history's subject) do not speak here
+        pfSeams.text = "";
+        let pr;
+        try { pr = reviewPrompt(d, loadPlans(d), { slug: "g", reviewer: "human" }, { git: gitReader({ run: () => ({ status: 128, stderr: "fatal: not a git repository", stdout: "" }) }), tmp: tg, env: {} }); }
+        finally { pfSeams.text = null; }
+        const prompt = pr.text ?? (pr.lines ?? []).join(" | ");
+        r.push(/Review 2, blocked on probe 8\.1\./.test(prompt));
+        expect("pf-blocked-twice", r.every(Boolean), JSON.stringify({ r, twice: pg({ reviews: two(PF_FROM, PF_FROM) }), prompt: prompt.slice(-600) }));
+      }
+
+      // the step-5 snags: a whole plan through checkPlan, its Business rules filled so only the rule under test speaks
+      const RULES = `## Business rules & invariants\n- whole: none — the export copies rows and adds nothing up\n${ONE}\n## Components\n`;
+      const whole = (text, reviews = rv("F1 advisory · wording").replace("missing components: none", "missing components: none\nundeclared families: none")) => {
+        const plans = loadStore(store({ "h.md": text.replace("## Components\n", RULES), "h.reviews.md": reviews }));
+        return checkPlan(plans.find((x) => x.slug === "h"), plans).problems;
+      };
+
+      // pf-dry-run-later (D9): a deferred dry run stands before approval; the item's pass then needs an observed run after it
+      {
+        const D1 = "- 2026-09-14 · note · dry-run · D1 · test: `node t.js` → 3 passing\n";
+        const LATER = "- 2026-09-14 · note · dry-run · D2 · later · step 3 · plants an unused import in src/a.ts\n";
+        const OBS = "- 2026-09-16 · note · dry-run · D2 · cmd: `npm run lint` → 1 error on the planted import\n";
+        const PASS = "- 2026-09-16 · D2 · pass · cmd: npm run lint → 0 errors · abc1234 · claude\n";
+        const plan3 = (log) => rp("h", 3, { fm: { created: PF_FROM, baselined: PF_FROM }, preReady: D1 + LATER, log });
+        const L = fmtP("laterUnobserved", { d: "D2", date: "2026-09-16", k: 3, plants: "an unused import in src/a.ts", type: "cmd" });
+        const before = whole(plan3("")), passOnly = whole(plan3(PASS)), observed = whole(plan3(OBS + PASS)), after = whole(plan3(PASS + OBS));
+        const r = [
+          before.length === 0,
+          same(passOnly, [L]),
+          observed.length === 0,
+          same(after, [L]),
+          // a malformed deferral is still a malformed dry-run note
+          whole(plan3("").replace("· later · step 3 ·", "· later · step three ·")).some((x) => x.includes("dry-run")),
+        ];
+        expect("pf-dry-run-later", r.every(Boolean), JSON.stringify({ r, before, passOnly, observed, after }));
+      }
+
+      // pf-review-forms (D10): Codex's `F1 · blocking ·` findings and a VERDICT with no newline after it parse as the canonical form
+      {
+        const canon = `## Review 1 · ${PF_FROM} · codex · plan commit abc1234\nF1 blocking · blocks: outcome · two writers lose an entry (7.2)\nF2 advisory · a clearer title\nmissing components: none\nundeclared families: none\n15/15 layers · 50/50 probes\nVERDICT: REVISE\n### Dispositions\n- F1 · accepted · a lock\n- F2 · rejected · advisory\n`;
+        const codex = `## Review 1 · ${PF_FROM} · codex · plan commit abc1234\nF1 · blocking · blocks: outcome · two writers lose an entry (7.2)\nF2 · advisory · a clearer title\nmissing components: none\nundeclared families: none\n15/15 layers · 50/50 probes\n### Dispositions\n- F1 · accepted · a lock\n- F2 · rejected · advisory\nVERDICT: REVISE`;
+        const view = (text) => parseReviews(text).map((x) => ({ n: x.n, verdict: x.verdict, findings: [...x.findings], tags: [...x.tags], blocks: [...x.findings].map((k) => [k, whatBlocks(x, k)]), probes: [...x.probes].map(([k, v]) => [k, [...v]]), disp: [...x.dispositions], rej: [...x.rejected], families: x.families }));
+        const a = view(canon), b = view(codex), c = view(codex.replace("VERDICT: REVISE", "VERDICT: READY"));
+        const r = [same(a, b), a[0]?.findings.length === 2 && a[0]?.verdict === "REVISE", c[0]?.verdict === "READY"];
+        expect("pf-review-forms", r.every(Boolean), JSON.stringify({ r, a, b }));
+      }
+
+      // pf-frozen-approve (D11): `status → ready · approve · frozen` checks on a frozen plan and on no other
+      {
+        const FROZE = (text) => text.replace("status → ready · approve · review: codex", "status → ready · approve · frozen");
+        const unfrozen = whole(FROZE(rp("h", 3, {})));
+        const F = "`status → ready · approve · frozen` needs a frozen approval";
+        const frozenPlan = FROZE(rp("h", 3, { fm: { review: "codex · frozen" } }));
+        const frozen = whole(frozenPlan, rv("F1 advisory · wording", { v: "REVISE" }).replace("missing components: none", "missing components: none\nundeclared families: none"));
+        const r = [unfrozen.some((x) => x.startsWith(F)), !frozen.some((x) => x.startsWith(F) || x.startsWith("transition to ready must read")), !whole(rp("h", 3, {})).some((x) => x.startsWith(F))];
+        expect("pf-frozen-approve", r.every(Boolean), JSON.stringify({ r, unfrozen, frozen }));
+      }
+
+      // pf-size (D14): every size dod prints leaves out ## Baseline — padding it changes nothing, padding the Log does
+      {
+        const text = rp("h", 3, { fm: { review: "pending" } }).replace("## Components\n", RULES);
+        const padBase = text.replace("## Baseline\n", `## Baseline\n${"<!-- pad -->\n".repeat(400)}`);
+        const padLog = text.replace("## Log\n", `## Log\n${"- 2026-09-14 · note · padding\n".repeat(200)}`);
+        let why = null;
+        const stamp = (plan) => {
+          const d = store({ "h.md": plan });
+          const tg = join(d, "tmp"); mkdirSync(tg, { recursive: true });
+          const pr = reviewPrompt(d, loadPlans(d), { slug: "h", reviewer: "human" }, { git: gitReader({ run: () => ({ status: 128, stderr: "fatal: not a git repository", stdout: "" }) }), tmp: tg, env: {} });
+          why = pr.lines; return Number(((pr.lines ?? []).join("\n").match(/ · plan (\d+) B · /) ?? [])[1] ?? NaN);
+        };
+        const s0 = stamp(text), sB = stamp(padBase), sL = stamp(padLog);
+        const r = [Number.isFinite(s0) && s0 === sB, Number.isFinite(sL) && sL > s0, planSize(padBase) === planSize(text), planSize(text) < Buffer.byteLength(text)];
+        expect("pf-size", r.every(Boolean), JSON.stringify({ r, s0, sB, sL, why }));
+      }
+    }
 
     // ns-blocking (D1)
     {

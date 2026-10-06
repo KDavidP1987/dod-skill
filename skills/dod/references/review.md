@@ -141,10 +141,17 @@ rubric-1 or rubric-2 plan's prompt is unchanged.
 > - **Missing components.** Ask what the finished product cannot be complete without that the plan does not
 >   name (its `## Components` section, when it has one). Before your coverage line, write exactly one line:
 >   `missing components: none`, or `missing components: <a>; <b>`, naming each one.
+> - **Undeclared families.** A family is a set of siblings the same check could apply to (EUR, USD and GBP
+>   invoices; three report formats). Name each family the plan checks one or some members of without declaring
+>   the set in its `siblings:` line (Business rules, probe 4.5). After the missing-components line, write exactly
+>   one line: `undeclared families: none`, or `undeclared families: <a>, <b>; <c>, <d>` — each set two or more
+>   names split by `,`, sets split by `;`.
 > - **What rubric 3 allows.** These forms are valid and are not findings by themselves: `host-check: <name> ·
 >   <command>` evidence (a check the project already ships); on a light plan, a probe answered
 >   `not in brief: <reason>` in Coverage (never a gating or layer-10 probe: that one is a finding);
->   `S-<n> · assumed · risk · … · finding: Review <k> F<f>` (a risk the owner accepted); `advances C<n>` on Build plan steps; `changes:` on a `discovered` amendment.
+>   `S-<n> · assumed · risk · … · finding: Review <k> F<f>` (a risk the owner accepted); `advances C<n>` on Build plan steps; `changes:` on a `discovered` amendment; `whole:` and `siblings:` lines in
+>   Business rules, and `twins: <sibling> D<n>, …` or `twins: none — <reason>` on an item;
+>   `S-<n> · assumed · risk · … · field: <n.m>` (a field probe the owner waived).
 > - End with `VERDICT: READY` when no finding carries `blocks:` and no component is missing, else
 >   `VERDICT: REVISE`.
 
@@ -154,18 +161,34 @@ Verified 2026-09-14 with codex-cli 0.151.0 on Windows (Git Bash). Feed the promp
 the file is larger than a command-line argument may be, and `codex exec` reads stdin anyway (without a
 redirect it blocks forever under a non-TTY driver). 10-minute ceiling. Do not pin `-m`.
 
-`<prompt file>` below is the name `--review-prompt` printed.
+`<prompt file>` below is the name `--review-prompt` printed; `<slug>` is the plan's slug and `<k>` the round's
+review number. Every file the review writes is made with `mktemp` as `dod-review-<slug>-r<k>-XXXXXX`, so two
+runs — even of the same plan and round at once — never share one. If Codex answers "model at capacity", run the
+same prompt file again, up to three tries in all; after the third, stop with
+`review: codex at capacity 3 times — round not run, prompt kept at <path>` and keep the prompt for a later run.
 
 ```bash
 # POSIX / Git Bash. -s read-only is mandatory. Add --skip-git-repo-check only if cwd is not a git repo.
 T="${TMPDIR:-/tmp}"   # Git Bash on Windows: T="$TEMP"
-timeout 600 codex exec -s read-only -o "$T/dod-review-out.txt" - < "$T/<prompt file>" 2>/dev/null >/dev/null
-tail -1 "$T/dod-review-out.txt"        # VERDICT line
+P="$T/<prompt file>"
+OUT=$(mktemp "$T/dod-review-<slug>-r<k>-XXXXXX"); ERR=$(mktemp "$T/dod-review-<slug>-r<k>-XXXXXX")
+ok=no
+for try in 1 2 3; do
+  timeout 600 codex exec -s read-only -o "$OUT" - < "$P" >/dev/null 2>"$ERR"
+  grep -qi "at capacity" "$OUT" "$ERR" || { ok=yes; break; }
+done
+if [ "$ok" = yes ]; then tail -1 "$OUT"; else echo "review: codex at capacity 3 times — round not run, prompt kept at $P"; fi
 ```
 ```powershell
 # PowerShell (add --skip-git-repo-check if the cwd is not a git repo; Start-Job/Wait-Job -Timeout 600 for a ceiling)
-Get-Content "$env:TEMP\<prompt file>" -Raw | codex exec -s read-only -o "$env:TEMP\dod-review-out.txt" -
-Get-Content "$env:TEMP\dod-review-out.txt" -Tail 1
+$P = "$env:TEMP\<prompt file>"
+$OUT = (New-Item -ItemType File -Path (Join-Path $env:TEMP ("dod-review-<slug>-r<k>-" + [IO.Path]::GetRandomFileName().Substring(0, 6)))).FullName
+$ok = $false
+foreach ($try in 1..3) {
+  $err = Get-Content $P -Raw | codex exec -s read-only -o $OUT - 2>&1 | Out-String
+  if (-not (((Get-Content $OUT -Raw) + $err) -match 'at capacity')) { $ok = $true; break }
+}
+if ($ok) { Get-Content $OUT -Tail 1 } else { "review: codex at capacity 3 times — round not run, prompt kept at $P" }
 ```
 Later rounds: run `--review-prompt` again on the revised plan — it adds the first line *"This is a revised
 plan; your earlier findings were F1–Fn."* and the `EARLIER:` request (Convergence rule, below) itself when
@@ -231,7 +254,10 @@ fill in, and put the review page's path — or its published link — in the sam
   `rejected · advisory by rule — names no outcome, component, design bar or limit` (or `accepted · advisory by
   rule — <what you changed anyway>`); until it is, `--check` reports it. Each component the sweep names gets
   its own line, numbered in the sweep's order: `- M1 · accepted · <change>` or `- M1 · rejected · <reason>`. A
-  review without the `missing components:` line is a `--check` problem. A REVISE whose findings are then all
+  review without the `missing components:` line is a `--check` problem. Each family the `undeclared families:`
+  line names gets the same treatment, numbered in the line's order: `- UF1 · accepted · <C or D id that now covers
+  it>` or `- UF1 · rejected · <reason>`. A review dated from dod 0.3.5 on without that line, or with a family left
+  undispositioned, is a `--check` problem; older reviews are not asked. A REVISE whose findings are then all
   advisory, and whose missing components were all rejected, **stands as READY**: the plan may be approved on
   it, and the next review starts a new run.
 - **Rubric 3: rounds, then freeze.** A light plan gets 2 `codex` or `subagent` rounds per run, a full plan 3.
